@@ -668,9 +668,11 @@
 (princ)
 
 
+
 ;;; ─────────────────────────────────────────────────────────────
 ;;; ADZZV - Align Texts X Position Only (no attribute change)
-;;; Flow: filter → choose alignment → move X only
+;;; Uses textbox/BoundingBox to read actual visual edges
+;;; Flow: filter → choose alignment → move X only (delta shift)
 ;;; ─────────────────────────────────────────────────────────────
 
 ;@name 文字X轴对齐（仅移动）
@@ -704,17 +706,24 @@
         (cond
           ((and alignment (>= alignment 0))
 
-           ;; ── Step 1: Find topmost text (highest Y) ─────────────
-           ;; No attribute adjustment here, read current points as-is
+           ;; Step 1: Find topmost text (highest Y of point 10)
            (setq top-ent (find-topmost-adzzf text-ss))
-           (setq ref-x   (get-align-x-adzzf top-ent alignment))
-           (princ (strcat "\n[Step 1] Reference text found. Ref X = "
-                          (rtos ref-x 2 4)))
 
-           ;; ── Step 2: Move all texts to align X ─────────────────
-           (align-texts-x-adzzf text-ss ref-x alignment)
-           (princ (strcat "\n[Step 2] " (itoa text-count)
-                          " text(s) aligned. ADZZV complete!"))
+           ;; Step 2: Get reference X from topmost text's ACTUAL visual edge
+           ;; Uses textbox/BoundingBox — independent of alignment attribute
+           (setq ref-x (get-visual-ref-x-adzzv top-ent alignment))
+
+           (if ref-x
+             (progn
+               (princ (strcat "\n[Step 1] Topmost text ref X = " (rtos ref-x 2 4)))
+
+               ;; Step 3: Move each text by delta so its visual edge = ref-x
+               (move-texts-to-ref-adzzv text-ss ref-x alignment)
+               (princ (strcat "\n[Step 2] " (itoa text-count)
+                              " text(s) aligned. ADZZV complete!"))
+             )
+             (princ "\nError: Could not read bounding box of reference text.")
+           )
           )
 
           (t (princ "\nCancelled. No changes made."))
@@ -725,6 +734,106 @@
     (t (princ "\nNo objects selected."))
   )
   (princ)
+)
+
+;; ── Get actual visual Left / Center / Right X via bounding box ─
+;; TEXT  → uses (textbox) which returns box relative to point 10
+;; MTEXT → uses vla-GetBoundingBox for world-space box
+
+(defun get-visual-ref-x-adzzv (ent alignment / ent-type ent-data bbox insert-x lx rx cx vla-obj minpt maxpt)
+  (setq ent-type (cdr (assoc 0 (entget ent))))
+  (setq ent-data (entget ent))
+
+  (cond
+    ((= ent-type "TEXT")
+     (setq bbox     (textbox ent-data))           ;; ((x1 y1) (x2 y2)) relative to pt10
+     (setq insert-x (cadr (assoc 10 ent-data)))
+     (setq lx (+ insert-x (caar bbox)))           ;; actual left  edge X
+     (setq rx (+ insert-x (car (cadr bbox))))     ;; actual right edge X
+     (setq cx (/ (+ lx rx) 2.0))                  ;; actual center    X
+     (cond
+       ((= alignment 0) lx)
+       ((= alignment 1) cx)
+       ((= alignment 2) rx)
+     )
+    )
+
+    ((= ent-type "MTEXT")
+     (setq vla-obj (vlax-ename->vla-object ent))
+     (vla-GetBoundingBox vla-obj 'minpt 'maxpt)
+     (setq minpt (vlax-safearray->list minpt))
+     (setq maxpt (vlax-safearray->list maxpt))
+     (setq lx (car minpt))
+     (setq rx (car maxpt))
+     (setq cx (/ (+ lx rx) 2.0))
+     (cond
+       ((= alignment 0) lx)
+       ((= alignment 1) cx)
+       ((= alignment 2) rx)
+     )
+    )
+  )
+)
+
+;; ── Move all texts so their visual edge aligns to ref-x ────────
+;; Shift ALL points (10 and 11) by the same delta
+;; This preserves the text's own alignment attribute completely
+
+(defun move-texts-to-ref-adzzv (ss ref-x alignment / i ent cur-x delta)
+  (setq i 0)
+  (repeat (sslength ss)
+    (setq ent   (ssname ss i))
+    (setq cur-x (get-visual-ref-x-adzzv ent alignment))
+
+    (if cur-x
+      (progn
+        (setq delta (- ref-x cur-x))
+        ;; Only move if delta is meaningful (avoid float noise)
+        (if (not (equal delta 0.0 0.001))
+          (shift-text-x-adzzv ent delta)
+        )
+      )
+      (princ (strcat "\n  [SKIP] Could not read bounding box for entity " (itoa i)))
+    )
+
+    (setq i (1+ i))
+  )
+)
+
+;; ── Shift a single text entity's X by delta (move all points) ──
+
+(defun shift-text-x-adzzv (ent delta / ent-type ent-data pt10 pt11)
+  (setq ent-type (cdr (assoc 0 (entget ent))))
+  (setq ent-data (entget ent))
+
+  (cond
+    ((= ent-type "TEXT")
+     ;; Shift point 10
+     (setq pt10 (assoc 10 ent-data))
+     (setq ent-data
+       (subst (list 10 (+ (cadr pt10) delta) (caddr pt10) (cadddr pt10))
+              pt10 ent-data))
+     ;; Shift point 11 if present (alignment/fit point)
+     (setq pt11 (assoc 11 ent-data))
+     (if pt11
+       (setq ent-data
+         (subst (list 11 (+ (cadr pt11) delta) (caddr pt11) (cadddr pt11))
+                pt11 ent-data))
+     )
+     (entmod ent-data)
+     (entupd ent)
+    )
+
+    ((= ent-type "MTEXT")
+     ;; MTEXT only has point 10 as anchor
+     (setq pt10 (assoc 10 ent-data))
+     (setq ent-data
+       (subst (list 10 (+ (cadr pt10) delta) (caddr pt10) (cadddr pt10))
+              pt10 ent-data))
+     (entmod ent-data)
+     (entupd ent)
+    )
+  )
 )
 
 (princ "\nCommand ADZZV loaded. Type ADZZV to start.")
