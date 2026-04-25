@@ -504,8 +504,13 @@
 ;@desc 框选文字，以Y坐标最高的文字为基准，左/中/右对齐所有文字X坐标
 ;@require Selection
 ;@require ModelSpace
-
-(defun c:ADZZF ( / ss text-ss text-count alignment top-ent ref-x)
+(defun c:ADZZF ()
+  (setq ss nil)
+  (setq text-ss nil)
+  (setq text-count 0)
+  (setq alignment nil)
+  (setq top-ent nil)
+  (setq ref-x nil)
   (princ "\n=== ADZZF Text X-Alignment (based on topmost text) ===")
   (princ "\nSelect text objects to align: ")
   (setq ss (ssget))
@@ -680,8 +685,13 @@
 ;@desc 框选文字，以Y坐标最高的文字为基准对齐X坐标，不修改文字本身对齐属性
 ;@require Selection
 ;@require ModelSpace
-
-(defun c:ADZZV ( / ss text-ss text-count alignment top-ent ref-x)
+(defun c:ADZZV ()
+  (setq ss nil)
+  (setq text-ss nil)
+  (setq text-count 0)
+  (setq alignment nil)
+  (setq top-ent nil)
+  (setq ref-x nil)
   (princ "\n=== ADZZV Text X-Alignment (position only, no attribute change) ===")
   (princ "\nSelect text objects to align: ")
   (setq ss (ssget))
