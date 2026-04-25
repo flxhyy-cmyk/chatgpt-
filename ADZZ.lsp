@@ -666,3 +666,66 @@
 
 (princ "\nCommand ADZZF loaded. Type ADZZF to start.")
 (princ)
+
+
+;;; ─────────────────────────────────────────────────────────────
+;;; ADZZV - Align Texts X Position Only (no attribute change)
+;;; Flow: filter → choose alignment → move X only
+;;; ─────────────────────────────────────────────────────────────
+
+;@name 文字X轴对齐（仅移动）
+;@group 文本编辑
+;@desc 框选文字，以Y坐标最高的文字为基准对齐X坐标，不修改文字本身对齐属性
+;@require Selection
+;@require ModelSpace
+
+(defun c:ADZZV ( / ss text-ss text-count alignment top-ent ref-x)
+  (princ "\n=== ADZZV Text X-Alignment (position only, no attribute change) ===")
+  (princ "\nSelect text objects to align: ")
+  (setq ss (ssget))
+
+  (cond
+    (ss
+     (setq text-ss (filter-text-objects-adzz ss))
+
+     (cond
+       ((or (not text-ss) (< (sslength text-ss) 2))
+        (princ "\nNeed at least 2 TEXT/MTEXT objects to align.")
+       )
+
+       (t
+        (setq text-count (sslength text-ss))
+        (princ (strcat "\nFiltered " (itoa text-count) " text object(s)"))
+        (sssetfirst nil text-ss)
+
+        ;; Choose alignment mode
+        (setq alignment (show-alignment-dialog-adzz))
+
+        (cond
+          ((and alignment (>= alignment 0))
+
+           ;; ── Step 1: Find topmost text (highest Y) ─────────────
+           ;; No attribute adjustment here, read current points as-is
+           (setq top-ent (find-topmost-adzzf text-ss))
+           (setq ref-x   (get-align-x-adzzf top-ent alignment))
+           (princ (strcat "\n[Step 1] Reference text found. Ref X = "
+                          (rtos ref-x 2 4)))
+
+           ;; ── Step 2: Move all texts to align X ─────────────────
+           (align-texts-x-adzzf text-ss ref-x alignment)
+           (princ (strcat "\n[Step 2] " (itoa text-count)
+                          " text(s) aligned. ADZZV complete!"))
+          )
+
+          (t (princ "\nCancelled. No changes made."))
+        )
+       )
+     )
+    )
+    (t (princ "\nNo objects selected."))
+  )
+  (princ)
+)
+
+(princ "\nCommand ADZZV loaded. Type ADZZV to start.")
+(princ)
