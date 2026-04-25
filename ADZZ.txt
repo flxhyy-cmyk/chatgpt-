@@ -492,3 +492,177 @@
 
 (princ "\nCommand ADZZH loaded. Type ADZZH to start.")
 (princ)
+
+
+;;; ─────────────────────────────────────────────────────────────
+;;; ADZZF - Align Texts X Position Based on Topmost Text
+;;; Flow: filter → choose alignment → apply attributes → move X
+;;; ─────────────────────────────────────────────────────────────
+
+;@name 文字X轴对齐
+;@group 文本编辑
+;@desc 框选文字，以Y坐标最高的文字为基准，左/中/右对齐所有文字X坐标
+;@require Selection
+;@require ModelSpace
+
+(defun c:ADZZF ( / ss text-ss text-count alignment top-ent ref-x)
+  (princ "\n=== ADZZF Text X-Alignment (based on topmost text) ===")
+  (princ "\nSelect text objects to align: ")
+  (setq ss (ssget))
+
+  (cond
+    (ss
+     (setq text-ss (filter-text-objects-adzz ss))
+
+     (cond
+       ;; Need at least 2 texts
+       ((or (not text-ss) (< (sslength text-ss) 2))
+        (princ "\nNeed at least 2 TEXT/MTEXT objects to align.")
+       )
+
+       (t
+        (setq text-count (sslength text-ss))
+        (princ (strcat "\nFiltered " (itoa text-count) " text object(s)"))
+        (sssetfirst nil text-ss)
+
+        ;; Choose alignment mode (reuse existing ADZZ dialog)
+        (setq alignment (show-alignment-dialog-adzz))
+
+        (cond
+          ((and alignment (>= alignment 0))
+
+           ;; ── Step 1: Apply text alignment attributes first ──────
+           ;; Must run before reading insertion points for accuracy
+           (apply-text-alignment-adzz text-ss alignment)
+           (princ "\n[Step 1] Alignment attributes applied.")
+
+           ;; ── Step 2: Find topmost text (highest Y) ─────────────
+           (setq top-ent (find-topmost-adzzf text-ss))
+           (setq ref-x   (get-align-x-adzzf top-ent alignment))
+           (princ (strcat "\n[Step 2] Reference text found. Ref X = "
+                          (rtos ref-x 2 4)))
+
+           ;; ── Step 3: Move all texts to align X ─────────────────
+           (align-texts-x-adzzf text-ss ref-x alignment)
+           (princ (strcat "\n[Step 3] " (itoa text-count)
+                          " text(s) aligned. ADZZF complete!"))
+          )
+
+          (t (princ "\nCancelled. No changes made."))
+        )
+       )
+     )
+    )
+    (t (princ "\nNo objects selected."))
+  )
+  (princ)
+)
+
+;; ── Find topmost entity (highest Y of insertion point) ────────
+
+(defun find-topmost-adzzf (ss / i ent top-ent top-y cur-y)
+  (setq top-ent (ssname ss 0))
+  (setq top-y   (caddr (assoc 10 (entget top-ent))))
+  (setq i 1)
+  (repeat (1- (sslength ss))
+    (setq ent   (ssname ss i))
+    (setq cur-y (caddr (assoc 10 (entget ent))))
+    (if (> cur-y top-y)
+      (progn
+        (setq top-ent ent)
+        (setq top-y   cur-y)
+      )
+    )
+    (setq i (1+ i))
+  )
+  top-ent
+)
+
+;; ── Get reference X from a text entity based on alignment ─────
+;; Left(0)  → TEXT uses point 10 X  / MTEXT uses point 10 X
+;; Center(1)→ TEXT uses point 11 X  / MTEXT uses point 10 X
+;; Right(2) → TEXT uses point 11 X  / MTEXT uses point 10 X
+
+(defun get-align-x-adzzf (ent alignment / ent-type ent-data)
+  (setq ent-type (cdr (assoc 0 (entget ent))))
+  (setq ent-data (entget ent))
+  (cond
+    ((= ent-type "TEXT")
+     (cond
+       ((= alignment 0) (cadr (assoc 10 ent-data)))  ;; left  → point 10
+       (t               (cadr (assoc 11 ent-data)))  ;; center/right → point 11
+     )
+    )
+    ((= ent-type "MTEXT")
+     (cadr (assoc 10 ent-data))  ;; MTEXT attachment always at point 10
+    )
+  )
+)
+
+;; ── Move all texts so their alignment X equals target-x ───────
+
+(defun align-texts-x-adzzf (ss target-x alignment / i ent ent-type ent-data pt10 pt11 cur-x delta new-x10)
+  (setq i 0)
+  (repeat (sslength ss)
+    (setq ent      (ssname ss i))
+    (setq ent-type (cdr (assoc 0 (entget ent))))
+    (setq ent-data (entget ent))
+
+    (cond
+      ;; TEXT object
+      ((= ent-type "TEXT")
+       (setq pt10 (assoc 10 ent-data))
+
+       (cond
+         ;; Left align: point 10 is the left edge, move it directly
+         ((= alignment 0)
+          (setq ent-data
+            (subst (list 10 target-x (caddr pt10) (cadddr pt10))
+                   pt10 ent-data))
+         )
+
+         ;; Center / Right: point 11 is the anchor, shift both 10 and 11
+         (t
+          (setq pt11 (assoc 11 ent-data))
+          (if pt11
+            (progn
+              (setq cur-x  (cadr pt11))
+              (setq delta  (- target-x cur-x))
+              (setq new-x10 (+ (cadr pt10) delta))
+              ;; Shift insertion point by same delta
+              (setq ent-data
+                (subst (list 10 new-x10 (caddr pt10) (cadddr pt10))
+                       pt10 ent-data))
+              ;; Set alignment point to target
+              (setq ent-data
+                (subst (list 11 target-x (caddr pt11) (cadddr pt11))
+                       pt11 ent-data))
+            )
+            ;; Fallback: point 11 missing, move point 10
+            (setq ent-data
+              (subst (list 10 target-x (caddr pt10) (cadddr pt10))
+                     pt10 ent-data))
+          )
+         )
+       )
+       (entmod ent-data)
+       (entupd ent)
+      )
+
+      ;; MTEXT object: attachment point is always point 10
+      ((= ent-type "MTEXT")
+       (setq pt10 (assoc 10 ent-data))
+       (setq ent-data
+         (subst (list 10 target-x (caddr pt10) (cadddr pt10))
+                pt10 ent-data))
+       (entmod ent-data)
+       (entupd ent)
+      )
+    )
+
+    (setq i (1+ i))
+  )
+)
+
+(princ "\nCommand ADZZF loaded. Type ADZZF to start.")
+(princ)
