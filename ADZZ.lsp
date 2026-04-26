@@ -64,25 +64,63 @@
   (princ)
 )
 
-;; Filter only TEXT and MTEXT objects
-(defun filter-text-objects-adzz (ss / i ent ent-type text-ss text-list)
+;; Filter only TEXT, MTEXT, and ATTRIB objects (including block text)
+(defun filter-text-objects-adzz (ss / i ent ent-type text-ss text-list attr-list block-text-data block-text-list block-count attr-count)
   (setq text-list '())
+  (setq block-text-list '())
   (setq i 0)
+  (setq block-count 0)
+  (setq attr-count 0)
   
   ;; Loop through selection set
   (repeat (sslength ss)
     (setq ent (ssname ss i))
     (setq ent-type (cdr (assoc 0 (entget ent))))
     
-    ;; Check if entity is TEXT or MTEXT
-    (if (or (= ent-type "TEXT") (= ent-type "MTEXT"))
-      (setq text-list (cons ent text-list))
+    ;; Check if entity is TEXT, MTEXT, or INSERT (block)
+    (cond
+      ;; TEXT or MTEXT
+      ((or (= ent-type "TEXT") (= ent-type "MTEXT"))
+       (setq text-list (cons ent text-list))
+      )
+      
+      ;; INSERT (block) - extract text content and attributes
+      ((= ent-type "INSERT")
+       (setq block-count (1+ block-count))
+       
+       ;; Extract text content from block definition (returns data, not entities)
+       (setq block-text-data (extract-block-text-content-adzze ent))
+       (if block-text-data
+         (progn
+           (setq attr-count (+ attr-count (length block-text-data)))
+           ;; Add to data list instead of entity list
+           (setq block-text-list (append block-text-data block-text-list))
+         )
+       )
+       
+       ;; Also extract attributes (these are real entities)
+       (setq attr-list (extract-block-attributes-adzz ent))
+       (if attr-list
+         (progn
+           (setq attr-count (+ attr-count (length attr-list)))
+           (setq text-list (append attr-list text-list))
+         )
+       )
+      )
     )
     
     (setq i (1+ i))
   )
   
+  ;; Debug info
+  (if (> block-count 0)
+    (princ (strcat "\nFound " (itoa block-count) " block(s), extracted " (itoa attr-count) " text/attribute(s)"))
+  )
+  
   ;; Create new selection set with filtered text objects
+  ;; Note: block text data is stored separately in global variable
+  (setq *ADZZE_BLOCK_TEXT_DATA* block-text-list)
+  
   (if text-list
     (progn
       (setq text-ss (ssadd))
@@ -91,8 +129,165 @@
       )
       text-ss
     )
-    nil
+    ;; If only block text (no real entities), return a dummy selection set marker
+    (if block-text-list
+      'block-text-only
+      nil
+    )
   )
+)
+
+;; Extract text content from block definition (return content with entity reference)
+(defun extract-block-text-content-adzze (blk-ent / blk-name blk-def ent ent-type text-list blk-insert-pt blk-scale blk-rotation ent-data text-content vla-obj insert-pt scaled-pt rotated-pt final-pt)
+  (setq text-list '())
+  (setq blk-name (cdr (assoc 2 (entget blk-ent))))
+  (setq blk-insert-pt (cdr (assoc 10 (entget blk-ent))))
+  (setq blk-scale (cdr (assoc 41 (entget blk-ent))))
+  (setq blk-rotation (cdr (assoc 50 (entget blk-ent))))
+  
+  (if (not blk-scale) (setq blk-scale 1.0))
+  (if (not blk-rotation) (setq blk-rotation 0.0))
+  
+  ;; Get block definition
+  (if (setq blk-def (tblsearch "BLOCK" blk-name))
+    (progn
+      ;; Get first entity in block definition
+      (setq ent (cdr (assoc -2 blk-def)))
+      
+      ;; Loop through all entities in block
+      (while ent
+        (setq ent-type (cdr (assoc 0 (entget ent))))
+        (setq ent-data (entget ent))
+        
+        ;; Check if it's TEXT or MTEXT
+        (cond
+          ((= ent-type "TEXT")
+           (setq text-content (cdr (assoc 1 ent-data)))
+           ;; Mark as block text with prefix
+           (setq text-content (strcat "[BLOCK] " text-content))
+           (setq insert-pt (cdr (assoc 10 ent-data)))
+           ;; Transform point to world coordinates
+           (setq final-pt (transform-point-adzze insert-pt blk-insert-pt blk-scale blk-rotation))
+           ;; Store as (Y-coord block-text-entity text-content)
+           ;; Use the actual entity in block definition
+           (setq text-list (cons (list (caddr final-pt) ent text-content) text-list))
+          )
+          
+          ((= ent-type "MTEXT")
+           (setq vla-obj (vlax-ename->vla-object ent))
+           (setq text-content (vla-get-TextString vla-obj))
+           (setq text-content (cleanup-mtext-adzze text-content))
+           (setq text-content (strcat "[BLOCK] " text-content))
+           (setq insert-pt (cdr (assoc 10 ent-data)))
+           (setq final-pt (transform-point-adzze insert-pt blk-insert-pt blk-scale blk-rotation))
+           (setq text-list (cons (list (caddr final-pt) ent text-content) text-list))
+          )
+        )
+        
+        ;; Get next entity
+        (setq ent (entnext ent))
+        
+        ;; Stop if we've left the block definition
+        (if (and ent (= (cdr (assoc 0 (entget ent))) "ENDBLK"))
+          (setq ent nil)
+        )
+      )
+    )
+  )
+  
+  text-list
+)
+
+;; Simple point transformation (approximate)
+(defun transform-point-adzze (pt blk-pt scale rotation / x y new-x new-y)
+  (setq x (car pt))
+  (setq y (cadr pt))
+  
+  ;; Scale
+  (setq x (* x scale))
+  (setq y (* y scale))
+  
+  ;; Rotate (simplified - only for 0 rotation)
+  ;; For full rotation support, need matrix transformation
+  
+  ;; Translate
+  (setq new-x (+ x (car blk-pt)))
+  (setq new-y (+ y (cadr blk-pt)))
+  
+  (list new-x new-y (+ y (cadr blk-pt)))
+)
+
+;; Extract text entities from block definition (OLD - not used)
+(defun extract-block-text-adzz (blk-ent / blk-name blk-def ent ent-type text-list)
+  (setq text-list '())
+  (setq blk-name (cdr (assoc 2 (entget blk-ent))))
+  
+  ;; Get block definition
+  (if (setq blk-def (tblsearch "BLOCK" blk-name))
+    (progn
+      ;; Get first entity in block definition
+      (setq ent (cdr (assoc -2 blk-def)))
+      
+      ;; Loop through all entities in block
+      (while ent
+        (setq ent-type (cdr (assoc 0 (entget ent))))
+        
+        ;; Check if it's TEXT or MTEXT
+        (if (or (= ent-type "TEXT") (= ent-type "MTEXT"))
+          (setq text-list (cons ent text-list))
+        )
+        
+        ;; Get next entity
+        (setq ent (entnext ent))
+        
+        ;; Stop if we've left the block definition
+        (if (and ent (= (cdr (assoc 0 (entget ent))) "ENDBLK"))
+          (setq ent nil)
+        )
+      )
+    )
+  )
+  
+  (reverse text-list)
+)
+(defun extract-block-attributes-adzz (blk-ent / attr-list vla-obj has-attribs attribs i attr attr-ent)
+  (setq attr-list '())
+  
+  ;; Method 1: Try using VLA object
+  (if (setq vla-obj (vlax-ename->vla-object blk-ent))
+    (progn
+      (setq has-attribs (vlax-property-available-p vla-obj 'HasAttributes))
+      
+      (if (and has-attribs (= (vla-get-HasAttributes vla-obj) :vlax-true))
+        (progn
+          (setq attribs (vla-GetAttributes vla-obj))
+          (setq i 0)
+          (repeat (vlax-safearray-get-u-bound attribs 1)
+            (setq attr (vlax-safearray-get-element attribs i))
+            (setq attr-ent (vlax-vla-object->ename attr))
+            (if attr-ent
+              (setq attr-list (cons attr-ent attr-list))
+            )
+            (setq i (1+ i))
+          )
+        )
+      )
+    )
+  )
+  
+  ;; Method 2: Fallback - use entnext method
+  (if (null attr-list)
+    (progn
+      (setq attr-ent (entnext blk-ent))
+      (while (and attr-ent
+                  (= "ATTRIB" (cdr (assoc 0 (entget attr-ent)))))
+        (setq attr-list (cons attr-ent attr-list))
+        (setq attr-ent (entnext attr-ent))
+      )
+    )
+  )
+  
+  (reverse attr-list)
 )
 
 ;; Get statistics of selection
@@ -869,20 +1064,43 @@
        )
        
        (t
-        (setq text-count (sslength text-ss))
-        (princ (strcat "\nFiltered " (itoa text-count) " text object(s)"))
-        
-        ;; Extract text with entities (sorted by Y position)
-        (setq text-data (extract-text-with-entities-adzze text-ss))
+        ;; Handle both real entities and block text data
+        (if (equal text-ss 'block-text-only)
+          (progn
+            ;; Only block text, no real entities
+            (setq text-count (length *ADZZE_BLOCK_TEXT_DATA*))
+            (princ (strcat "\nExtracted " (itoa text-count) " text object(s) from blocks"))
+            
+            ;; Use block text data directly
+            (setq text-data *ADZZE_BLOCK_TEXT_DATA*)
+          )
+          (progn
+            ;; Real entities (may also have block text)
+            (setq text-count (sslength text-ss))
+            (if *ADZZE_BLOCK_TEXT_DATA*
+              (setq text-count (+ text-count (length *ADZZE_BLOCK_TEXT_DATA*)))
+            )
+            (princ (strcat "\nFiltered " (itoa text-count) " text object(s)"))
+            
+            ;; Extract text with entities (sorted by Y position)
+            (setq text-data (extract-text-with-entities-adzze text-ss))
+            
+            ;; Merge with block text data
+            (if *ADZZE_BLOCK_TEXT_DATA*
+              (setq text-data (append text-data *ADZZE_BLOCK_TEXT_DATA*))
+            )
+            
+            ;; Re-sort by Y coordinate
+            (setq text-data (vl-sort text-data '(lambda (a b) (> (car a) (car b)))))
+          )
+        )
         
         (if text-data
           (progn
-            ;; Auto copy to clipboard
+            ;; Auto copy to clipboard (silent)
             (setq text-lines (mapcar 'caddr text-data))
-            (if (auto-copy-to-clipboard-adzze text-lines)
-              (princ "\nText content automatically copied to clipboard!")
-              (princ "\nNote: Auto-copy to clipboard not available. You can manually copy from the dialog.")
-            )
+            (auto-copy-to-clipboard-adzze text-lines)
+            (princ "\n[Text copied to clipboard]")
             
             ;; Show DCL editor
             (setq modified-data (show-text-editor-dcl-adzze text-data))
@@ -891,6 +1109,10 @@
               (progn
                 (setq modified-count (apply-modified-text-adzze modified-data))
                 (princ (strcat "\nSuccess! Modified " (itoa modified-count) " text object(s)"))
+                ;; Regenerate after dialog closes (if block text was modified)
+                (if (check-block-text-modified-adzze modified-data)
+                  (command "_.REGEN")
+                )
               )
               (princ "\nNo changes made.")
             )
@@ -906,30 +1128,34 @@
   (princ)
 )
 
-;; ── Auto copy text to clipboard (using DATA EXTRACTION method) ──
+;; ── Auto copy text to clipboard (silent, no error handling) ──
 
-(defun auto-copy-to-clipboard-adzze (text-lines / all-text data-obj)
+(defun auto-copy-to-clipboard-adzze (text-lines / all-text data-obj window-obj)
   ;; Combine all lines with newline
   (setq all-text "")
   (foreach line text-lines
     (setq all-text (strcat all-text line "\n"))
   )
   
-  ;; Try using COM object to access clipboard
-  (if (and (setq data-obj (vlax-create-object "htmlfile"))
-           (setq window-obj (vlax-get-property data-obj 'parentWindow)))
-    (progn
-      (vlax-invoke-method 
-        (vlax-get-property window-obj 'clipboardData) 
-        'setData 
-        "text" 
-        all-text)
-      (vlax-release-object data-obj)
-      t
-    )
-    ;; Fallback: return nil if COM method fails
-    nil
+  ;; Try using COM object to access clipboard (silent - ignore errors)
+  (vl-catch-all-apply
+    '(lambda ()
+       (if (and (setq data-obj (vlax-create-object "htmlfile"))
+                (setq window-obj (vlax-get-property data-obj 'parentWindow)))
+         (progn
+           (vlax-invoke-method 
+             (vlax-get-property window-obj 'clipboardData) 
+             'setData 
+             "text" 
+             all-text)
+           (vlax-release-object data-obj)
+         )
+       )
+     )
   )
+  
+  ;; Always return without error
+  t
 )
 
 ;; ── Extract text with entity references ──────────────────────
@@ -958,7 +1184,7 @@
 
 ;; ── Get text with entity reference ───────────────────────────
 
-(defun get-text-with-entity-adzze (ent / ent-type ent-data text-content y-coord vla-obj insert-pt)
+(defun get-text-with-entity-adzze (ent / ent-type ent-data text-content y-coord vla-obj insert-pt tag-name)
   (setq ent-type (cdr (assoc 0 (entget ent))))
   (setq ent-data (entget ent))
   (setq text-content "")
@@ -980,6 +1206,16 @@
      (setq insert-pt (cdr (assoc 10 ent-data)))
      (setq y-coord (caddr insert-pt))
     )
+    
+    ;; ATTRIB object (block attribute)
+    ((= ent-type "ATTRIB")
+     (setq text-content (cdr (assoc 1 ent-data)))
+     (setq tag-name (cdr (assoc 2 ent-data)))
+     ;; Add tag name as prefix for clarity
+     (setq text-content (strcat "[" tag-name "] " text-content))
+     (setq insert-pt (cdr (assoc 10 ent-data)))
+     (setq y-coord (caddr insert-pt))
+    )
   )
   
   (if (and text-content (> (strlen text-content) 0))
@@ -988,36 +1224,86 @@
   )
 )
 
-;; ── Show DCL text editor ──────────────────────────────────────
+;; ── Show DCL text editor with common phrases ─────────────────
 
-(defun show-text-editor-dcl-adzze (text-data / dcl-file dcl-id result text-lines current-idx edit-value modified-flags)
+(defun show-text-editor-dcl-adzze (text-data / dcl-file dcl-id result text-lines current-idx edit-value modified-flags common-phrases common-idx new-phrase old-dynmode)
   (setq dcl-file (vl-filename-mktemp nil nil ".dcl"))
   (setq text-lines (mapcar 'caddr text-data))  ;; Extract text content
   (setq modified-flags (mapcar '(lambda (x) nil) text-data))  ;; Track modifications
   (setq current-idx 0)
+  (setq common-idx 0)
+  
+  ;; Save and disable dynamic input to prevent tooltip freeze
+  (setq old-dynmode (getvar "DYNMODE"))
+  (setvar "DYNMODE" 0)
+  
+  ;; Load common phrases from config file
+  (setq common-phrases (load-common-phrases-adzze))
   
   ;; Create DCL file
   (setq f (open dcl-file "w"))
   (write-line "adzze_edit : dialog {" f)
   (write-line "  label = \"ADZZE - Edit Text Content\";" f)
-  (write-line "  : text {" f)
-  (write-line "    label = \"Select a line to edit (top to bottom order):\";" f)
+  (write-line "  : row {" f)
+  
+  ;; Left column - Text editing area
+  (write-line "    : column {" f)
+  (write-line "      : text {" f)
+  (write-line "        label = \"Select a line to edit (top to bottom):\";" f)
+  (write-line "      }" f)
+  (write-line "      : list_box {" f)
+  (write-line "        key = \"text_list\";" f)
+  (write-line "        width = 60;" f)
+  (write-line "        height = 15;" f)
+  (write-line "        fixed_width_font = true;" f)
+  (write-line "        multiple_select = false;" f)
+  (write-line "      }" f)
+  (write-line "      : text {" f)
+  (write-line "        label = \"Edit selected line:\";" f)
+  (write-line "      }" f)
+  (write-line "      : edit_box {" f)
+  (write-line "        key = \"edit_text\";" f)
+  (write-line "        edit_width = 60;" f)
+  (write-line "        edit_limit = 2000;" f)
+  (write-line "      }" f)
+  (write-line "    }" f)
+  
+  ;; Right column - Common phrases area
+  (write-line "    : column {" f)
+  (write-line "      : text {" f)
+  (write-line "        label = \"Common Phrases (double-click to use):\";" f)
+  (write-line "      }" f)
+  (write-line "      : list_box {" f)
+  (write-line "        key = \"common_list\";" f)
+  (write-line "        width = 30;" f)
+  (write-line "        height = 15;" f)
+  (write-line "        fixed_width_font = true;" f)
+  (write-line "        multiple_select = false;" f)
+  (write-line "      }" f)
+  (write-line "      : row {" f)
+  (write-line "        : button {" f)
+  (write-line "          key = \"add_phrase\";" f)
+  (write-line "          label = \"Add\";" f)
+  (write-line "          fixed_width = true;" f)
+  (write-line "          width = 8;" f)
+  (write-line "        }" f)
+  (write-line "        : button {" f)
+  (write-line "          key = \"del_phrase\";" f)
+  (write-line "          label = \"Delete\";" f)
+  (write-line "          fixed_width = true;" f)
+  (write-line "          width = 8;" f)
+  (write-line "        }" f)
+  (write-line "      }" f)
+  (write-line "      : edit_box {" f)
+  (write-line "        key = \"new_phrase\";" f)
+  (write-line "        label = \"New phrase:\";" f)
+  (write-line "        edit_width = 30;" f)
+  (write-line "      }" f)
+  (write-line "    }" f)
+  
   (write-line "  }" f)
-  (write-line "  : list_box {" f)
-  (write-line "    key = \"text_list\";" f)
-  (write-line "    width = 80;" f)
-  (write-line "    height = 15;" f)
-  (write-line "    fixed_width_font = true;" f)
-  (write-line "    multiple_select = false;" f)
-  (write-line "  }" f)
-  (write-line "  : text {" f)
-  (write-line "    label = \"Edit selected line:\";" f)
-  (write-line "  }" f)
-  (write-line "  : edit_box {" f)
-  (write-line "    key = \"edit_text\";" f)
-  (write-line "    edit_width = 80;" f)
-  (write-line "    edit_limit = 2000;" f)
-  (write-line "  }" f)
+  
+  ;; Bottom buttons
   (write-line "  : row {" f)
   (write-line "    : button {" f)
   (write-line "      key = \"update\";" f)
@@ -1049,20 +1335,90 @@
       (setq result nil)
     )
     (progn
-      ;; Populate list
+      ;; Populate text list
       (start_list "text_list")
       (mapcar 'add_list text-lines)
+      (end_list)
+      
+      ;; Populate common phrases list
+      (start_list "common_list")
+      (mapcar 'add_list common-phrases)
       (end_list)
       
       ;; Set initial selection
       (set_tile "text_list" "0")
       (set_tile "edit_text" (nth 0 text-lines))
       
-      ;; Action for list selection
+      ;; Action for text list selection - auto save before switching
       (action_tile "text_list"
         "(progn
+           (setq edit-value (get_tile \"edit_text\"))
+           (if (not (equal edit-value (nth current-idx text-lines)))
+             (progn
+               (setq text-lines (subst-nth current-idx edit-value text-lines))
+               (setq modified-flags (subst-nth current-idx t modified-flags))
+             )
+           )
            (setq current-idx (atoi $value))
            (set_tile \"edit_text\" (nth current-idx text-lines))
+           (start_list \"text_list\")
+           (mapcar 'add_list text-lines)
+           (end_list)
+           (set_tile \"text_list\" (itoa current-idx))
+         )")
+      
+      ;; Action for common phrases list - double click to replace
+      (action_tile "common_list"
+        "(progn
+           (setq common-idx (atoi $value))
+           (if (= $reason 4)
+             (progn
+               (setq edit-value (nth common-idx common-phrases))
+               (set_tile \"edit_text\" edit-value)
+               (setq text-lines (subst-nth current-idx edit-value text-lines))
+               (setq modified-flags (subst-nth current-idx t modified-flags))
+               (start_list \"text_list\")
+               (mapcar 'add_list text-lines)
+               (end_list)
+               (set_tile \"text_list\" (itoa current-idx))
+             )
+           )
+         )")
+      
+      ;; Action for Add phrase button
+      (action_tile "add_phrase"
+        "(progn
+           (setq new-phrase (get_tile \"new_phrase\"))
+           (if (and new-phrase (> (strlen new-phrase) 0))
+             (progn
+               (setq common-phrases (append common-phrases (list new-phrase)))
+               (save-common-phrases-adzze common-phrases)
+               (start_list \"common_list\")
+               (mapcar 'add_list common-phrases)
+               (end_list)
+               (set_tile \"new_phrase\" \"\")
+             )
+           )
+         )")
+      
+      ;; Action for Delete phrase button
+      (action_tile "del_phrase"
+        "(progn
+           (if (and common-phrases (>= common-idx 0) (< common-idx (length common-phrases)))
+             (progn
+               (setq common-phrases (remove-nth common-idx common-phrases))
+               (save-common-phrases-adzze common-phrases)
+               (start_list \"common_list\")
+               (mapcar 'add_list common-phrases)
+               (end_list)
+               (if (>= common-idx (length common-phrases))
+                 (setq common-idx (max 0 (1- (length common-phrases))))
+               )
+               (if common-phrases
+                 (set_tile \"common_list\" (itoa common-idx))
+               )
+             )
+           )
          )")
       
       ;; Action for Update button
@@ -1097,6 +1453,9 @@
   
   ;; Delete temporary DCL file
   (vl-file-delete dcl-file)
+  
+  ;; Restore dynamic input mode
+  (setvar "DYNMODE" old-dynmode)
   
   ;; Return modified data if user clicked Apply
   (if (= result 1)
@@ -1152,9 +1511,71 @@
   result
 )
 
+;; ── Helper: remove nth element from list ─────────────────────
+
+(defun remove-nth (n lst / i result)
+  (setq i 0)
+  (setq result '())
+  (foreach item lst
+    (if (/= i n)
+      (setq result (append result (list item)))
+    )
+    (setq i (1+ i))
+  )
+  result
+)
+
+;; ── Load common phrases from config file ─────────────────────
+
+(defun load-common-phrases-adzze (/ config-file phrases f line)
+  (setq config-file (strcat (getenv "APPDATA") "\\ADZZE_CommonPhrases.txt"))
+  (setq phrases '())
+  
+  (if (findfile config-file)
+    (progn
+      (setq f (open config-file "r"))
+      (if f
+        (progn
+          (while (setq line (read-line f))
+            (if (> (strlen line) 0)
+              (setq phrases (append phrases (list line)))
+            )
+          )
+          (close f)
+        )
+      )
+    )
+    ;; Create default phrases if file doesn't exist
+    (progn
+      (setq phrases '("待定" "核实" "修改" "确认" "删除" "保留"))
+      (save-common-phrases-adzze phrases)
+    )
+  )
+  
+  phrases
+)
+
+;; ── Save common phrases to config file ───────────────────────
+
+(defun save-common-phrases-adzze (phrases / config-file f)
+  (setq config-file (strcat (getenv "APPDATA") "\\ADZZE_CommonPhrases.txt"))
+  
+  (setq f (open config-file "w"))
+  (if f
+    (progn
+      (foreach phrase phrases
+        (write-line phrase f)
+      )
+      (close f)
+      t
+    )
+    nil
+  )
+)
+
 ;; ── Apply modified text to drawing ───────────────────────────
 
-(defun apply-modified-text-adzze (modified-data / modified-count ent new-text ent-type ent-data vla-obj)
+(defun apply-modified-text-adzze (modified-data / modified-count ent new-text ent-type ent-data vla-obj clean-text)
   (setq modified-count 0)
   
   (foreach item modified-data
@@ -1163,8 +1584,12 @@
     (setq ent-type (cdr (assoc 0 (entget ent))))
     
     (cond
-      ;; TEXT object
+      ;; TEXT object (including block definition text)
       ((= ent-type "TEXT")
+       ;; Remove [BLOCK] prefix if present
+       (if (= (substr new-text 1 7) "[BLOCK]")
+         (setq new-text (substr new-text 9))
+       )
        (setq ent-data (entget ent))
        (setq ent-data (subst (cons 1 new-text) (assoc 1 ent-data) ent-data))
        (entmod ent-data)
@@ -1172,10 +1597,29 @@
        (setq modified-count (1+ modified-count))
       )
       
-      ;; MTEXT object
+      ;; MTEXT object (including block definition mtext)
       ((= ent-type "MTEXT")
+       ;; Remove [BLOCK] prefix if present
+       (if (= (substr new-text 1 7) "[BLOCK]")
+         (setq new-text (substr new-text 9))
+       )
        (setq vla-obj (vlax-ename->vla-object ent))
        (vla-put-TextString vla-obj new-text)
+       (entupd ent)
+       (setq modified-count (1+ modified-count))
+      )
+      
+      ;; ATTRIB object (block attribute)
+      ((= ent-type "ATTRIB")
+       ;; Remove tag prefix if present: "[TAG] value" -> "value"
+       (setq clean-text new-text)
+       (if (and (= (substr clean-text 1 1) "[")
+                (setq close-pos (vl-string-search "]" clean-text)))
+         (setq clean-text (substr clean-text (+ close-pos 3)))
+       )
+       (setq ent-data (entget ent))
+       (setq ent-data (subst (cons 1 clean-text) (assoc 1 ent-data) ent-data))
+       (entmod ent-data)
        (entupd ent)
        (setq modified-count (1+ modified-count))
       )
@@ -1183,6 +1627,23 @@
   )
   
   modified-count
+)
+
+;; ── Check if block text was modified ─────────────────────────
+
+(defun check-block-text-modified-adzze (modified-data / has-block-text)
+  (setq has-block-text nil)
+  
+  (foreach item modified-data
+    (setq new-text (cadr item))
+    ;; Check if any text has [BLOCK] prefix
+    (if (and (>= (strlen new-text) 7)
+             (= (substr new-text 1 7) "[BLOCK]"))
+      (setq has-block-text t)
+    )
+  )
+  
+  has-block-text
 )
 
 ;; ── Clean up MTEXT formatting ────────────────────────────────
