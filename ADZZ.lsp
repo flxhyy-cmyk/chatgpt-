@@ -1277,7 +1277,7 @@
   (write-line "      : text { label = \"文字列表（从上到下）/ Lines (top→bottom):\"; }" f)
   (write-line "      : list_box {" f)
   (write-line "        key = \"text_list\";" f)
-  (write-line "        width = 58;" f)
+  (write-line "        width = 40;" f)
   (write-line "        height = 15;" f)
   (write-line "        fixed_width_font = true;" f)
   (write-line "        multiple_select = false;" f)
@@ -1285,47 +1285,47 @@
   (write-line "      : text { label = \"编辑选中行 / Edit selected line:\"; }" f)
   (write-line "      : edit_box {" f)
   (write-line "        key = \"edit_text\";" f)
-  (write-line "        edit_width = 58;" f)
+  (write-line "        edit_width = 40;" f)
   (write-line "        edit_limit = 2000;" f)
   (write-line "      }" f)
-  (write-line "    }" f)
+  (write-line "    }" f)   ;; end left column
 
-  ;; ── RIGHT COLUMN: category tabs + phrase list ────────────────
+  ;; ── MIDDLE COLUMN: phrase list ───────────────────────────────
   (write-line "    : column {" f)
-
-  ;; Category list (acts as tab selector)
-  (write-line "      : text { label = \"分类标签 / Categories:\"; }" f)
-  (write-line "      : list_box {" f)
-  (write-line "        key = \"cat_list\";" f)
-  (write-line "        width = 30;" f)
-  (write-line "        height = 6;" f)
-  (write-line "        multiple_select = false;" f)
-  (write-line "      }" f)
-  ;; Category management row
-  (write-line "      : row {" f)
-  (write-line "        : edit_box { key = \"new_cat\"; edit_width = 14; }" f)
-  (write-line "        : button { key = \"add_cat\"; label = \"新增分类\"; fixed_width = true; width = 10; }" f)
-  (write-line "        : button { key = \"del_cat\"; label = \"删除\"; fixed_width = true; width = 6; }" f)
-  (write-line "      }" f)
-
-  (write-line "      : text { label = \"────────────────────────────\"; }" f)
-
-  ;; Phrase list for selected category
   (write-line "      : text { label = \"候选文字（双击使用）/ Phrases (dbl-click):\"; }" f)
   (write-line "      : list_box {" f)
   (write-line "        key = \"common_list\";" f)
-  (write-line "        width = 30;" f)
-  (write-line "        height = 9;" f)
+  (write-line "        width = 25;" f)
+  (write-line "        height = 15;" f)
+  (write-line "        fixed_width_font = true;" f)
   (write-line "        multiple_select = false;" f)
   (write-line "      }" f)
   ;; Phrase management row
   (write-line "      : row {" f)
-  (write-line "        : edit_box { key = \"new_phrase\"; edit_width = 14; }" f)
-  (write-line "        : button { key = \"add_phrase\"; label = \"添加词条\"; fixed_width = true; width = 10; }" f)
+  (write-line "        : edit_box { key = \"new_phrase\"; edit_width = 12; }" f)
+  (write-line "        : button { key = \"add_phrase\"; label = \"添加\"; fixed_width = true; width = 6; }" f)
   (write-line "        : button { key = \"del_phrase\"; label = \"删除\"; fixed_width = true; width = 6; }" f)
   (write-line "      }" f)
+  (write-line "    }" f)   ;; end middle column
 
+  ;; ── RIGHT COLUMN: category tabs ──────────────────────────────
+  (write-line "    : column {" f)
+  (write-line "      : text { label = \"分类标签 / Categories:\"; }" f)
+  (write-line "      : list_box {" f)
+  (write-line "        key = \"cat_list\";" f)
+  (write-line "        width = 25;" f)
+  (write-line "        height = 15;" f)
+  (write-line "        fixed_width_font = true;" f)
+  (write-line "        multiple_select = false;" f)
+  (write-line "      }" f)
+  ;; Category management row
+  (write-line "      : row {" f)
+  (write-line "        : edit_box { key = \"new_cat\"; edit_width = 12; }" f)
+  (write-line "        : button { key = \"add_cat\"; label = \"新增\"; fixed_width = true; width = 6; }" f)
+  (write-line "        : button { key = \"del_cat\"; label = \"删除\"; fixed_width = true; width = 6; }" f)
+  (write-line "      }" f)
   (write-line "    }" f)   ;; end right column
+
   (write-line "  }" f)     ;; end row
 
   ;; Bottom action buttons
@@ -1404,21 +1404,30 @@
         "(progn
            (if (and *ADZZE_CATS* (>= *ADZZE_CUR_CAT* 0) (< *ADZZE_CUR_CAT* (length *ADZZE_CATS*)))
              (progn
-               (setq *ADZZE_CATS* (remove-nth *ADZZE_CUR_CAT* *ADZZE_CATS*))
-               (save-common-phrases-adzze *ADZZE_CATS*)
-               (if (>= *ADZZE_CUR_CAT* (length *ADZZE_CATS*))
-                 (setq *ADZZE_CUR_CAT* (max 0 (1- (length *ADZZE_CATS*))))
+               ;; Check if category has phrases
+               (setq *adzze-cat-phrases* (cdr (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)))
+               (if (and *adzze-cat-phrases* (> (length *adzze-cat-phrases*) 0))
+                 ;; Category has phrases - prevent deletion
+                 (alert \"无法删除此分类！\\n该分类下还有候选文字。\\n请先删除所有候选文字后再删除分类。\\n\\nCannot delete this category!\\nIt still contains phrases.\\nPlease delete all phrases first.\")
+                 ;; Category is empty - allow deletion
+                 (progn
+                   (setq *ADZZE_CATS* (remove-nth *ADZZE_CUR_CAT* *ADZZE_CATS*))
+                   (save-common-phrases-adzze *ADZZE_CATS*)
+                   (if (>= *ADZZE_CUR_CAT* (length *ADZZE_CATS*))
+                     (setq *ADZZE_CUR_CAT* (max 0 (1- (length *ADZZE_CATS*))))
+                   )
+                   (setq *ADZZE_CUR_PHRASES*
+                     (if *ADZZE_CATS* (cdr (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)) nil))
+                   (setq *ADZZE_COMMON_IDX* 0)
+                   (start_list \"cat_list\")
+                   (if *ADZZE_CATS* (mapcar 'add_list (adzze-get-cat-names)))
+                   (end_list)
+                   (if *ADZZE_CATS* (set_tile \"cat_list\" (itoa *ADZZE_CUR_CAT*)))
+                   (start_list \"common_list\")
+                   (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
+                   (end_list)
+                 )
                )
-               (setq *ADZZE_CUR_PHRASES*
-                 (if *ADZZE_CATS* (cdr (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)) nil))
-               (setq *ADZZE_COMMON_IDX* 0)
-               (start_list \"cat_list\")
-               (if *ADZZE_CATS* (mapcar 'add_list (adzze-get-cat-names)))
-               (end_list)
-               (if *ADZZE_CATS* (set_tile \"cat_list\" (itoa *ADZZE_CUR_CAT*)))
-               (start_list \"common_list\")
-               (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
-               (end_list)
              )
            )
          )")
@@ -1438,7 +1447,14 @@
                    (start_list \"text_list\")
                    (mapcar 'add_list *ADZZE_TEXT_LINES*)
                    (end_list)
+                   ;; Move to next line if not at the end
+                   (if (< *ADZZE_CUR_IDX* (1- (length *ADZZE_TEXT_LINES*)))
+                     (setq *ADZZE_CUR_IDX* (1+ *ADZZE_CUR_IDX*))
+                   )
                    (set_tile \"text_list\" (itoa *ADZZE_CUR_IDX*))
+                   (set_tile \"edit_text\" (nth *ADZZE_CUR_IDX* *ADZZE_TEXT_LINES*))
+                   ;; Set focus to text_list
+                   (mode_tile \"text_list\" 2)
                  )
                )
              )
