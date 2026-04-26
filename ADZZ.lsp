@@ -837,3 +837,305 @@
 
 (princ "\nCommand ADZZV loaded. Type ADZZV to start.")
 (princ)
+
+
+;;; ─────────────────────────────────────────────────────────────
+;;; ADZZE - Extract and Edit Text Content (DCL Native)
+;;; Function: Extract text and edit in DCL dialog with list view
+;;; ─────────────────────────────────────────────────────────────
+
+;@name 提取并编辑文字
+;@group 文本编辑
+;@desc 提取文字到DCL对话框，逐个编辑后写回图纸（无编码问题）
+;@require Selection
+;@require ModelSpace
+
+(defun c:ADZZE ()
+  (setq ss nil)
+  (setq text-ss nil)
+  (setq text-count 0)
+  
+  (princ "\n=== ADZZE Extract and Edit Text (DCL Native) ===")
+  (princ "\nSelect text objects to extract and edit: ")
+  (setq ss (ssget))
+  
+  (cond
+    (ss
+     (setq text-ss (filter-text-objects-adzz ss))
+     
+     (cond
+       ((not text-ss)
+        (princ "\nNo TEXT or MTEXT objects found in selection!")
+       )
+       
+       (t
+        (setq text-count (sslength text-ss))
+        (princ (strcat "\nFiltered " (itoa text-count) " text object(s)"))
+        
+        ;; Extract text with entities (sorted by Y position)
+        (setq text-data (extract-text-with-entities-adzze text-ss))
+        
+        (if text-data
+          (progn
+            ;; Show DCL editor
+            (setq modified-data (show-text-editor-dcl-adzze text-data))
+            
+            (if modified-data
+              (progn
+                (setq modified-count (apply-modified-text-adzze modified-data))
+                (princ (strcat "\nSuccess! Modified " (itoa modified-count) " text object(s)"))
+              )
+              (princ "\nNo changes made.")
+            )
+          )
+          (princ "\nNo text content found!")
+        )
+       )
+     )
+    )
+    (t (princ "\nNo objects selected."))
+  )
+  
+  (princ)
+)
+
+;; ── Extract text with entity references ──────────────────────
+
+(defun extract-text-with-entities-adzze (ss / i ent text-list sorted-list)
+  (setq text-list '())
+  (setq i 0)
+  
+  ;; Collect: (Y-coord entity text-content)
+  (repeat (sslength ss)
+    (setq ent (ssname ss i))
+    (setq item (get-text-with-entity-adzze ent))
+    
+    (if item
+      (setq text-list (cons item text-list))
+    )
+    
+    (setq i (1+ i))
+  )
+  
+  ;; Sort by Y (descending - top to bottom)
+  (setq sorted-list (vl-sort text-list '(lambda (a b) (> (car a) (car b)))))
+  
+  sorted-list
+)
+
+;; ── Get text with entity reference ───────────────────────────
+
+(defun get-text-with-entity-adzze (ent / ent-type ent-data text-content y-coord vla-obj insert-pt)
+  (setq ent-type (cdr (assoc 0 (entget ent))))
+  (setq ent-data (entget ent))
+  (setq text-content "")
+  (setq y-coord 0.0)
+  
+  (cond
+    ;; TEXT object
+    ((= ent-type "TEXT")
+     (setq text-content (cdr (assoc 1 ent-data)))
+     (setq insert-pt (cdr (assoc 10 ent-data)))
+     (setq y-coord (caddr insert-pt))
+    )
+    
+    ;; MTEXT object
+    ((= ent-type "MTEXT")
+     (setq vla-obj (vlax-ename->vla-object ent))
+     (setq text-content (vla-get-TextString vla-obj))
+     (setq text-content (cleanup-mtext-adzze text-content))
+     (setq insert-pt (cdr (assoc 10 ent-data)))
+     (setq y-coord (caddr insert-pt))
+    )
+  )
+  
+  (if (and text-content (> (strlen text-content) 0))
+    (list y-coord ent text-content)
+    nil
+  )
+)
+
+;; ── Show DCL text editor ──────────────────────────────────────
+
+(defun show-text-editor-dcl-adzze (text-data / dcl-file dcl-id result text-lines current-idx edit-value modified-flags)
+  (setq dcl-file (vl-filename-mktemp nil nil ".dcl"))
+  (setq text-lines (mapcar 'caddr text-data))  ;; Extract text content
+  (setq modified-flags (mapcar '(lambda (x) nil) text-data))  ;; Track modifications
+  (setq current-idx 0)
+  
+  ;; Create DCL file
+  (setq f (open dcl-file "w"))
+  (write-line "adzze_edit : dialog {" f)
+  (write-line "  label = \"ADZZE - Edit Text Content\";" f)
+  (write-line "  : text {" f)
+  (write-line "    label = \"Select a line to edit (top to bottom order):\";" f)
+  (write-line "  }" f)
+  (write-line "  : list_box {" f)
+  (write-line "    key = \"text_list\";" f)
+  (write-line "    width = 80;" f)
+  (write-line "    height = 15;" f)
+  (write-line "    fixed_width_font = true;" f)
+  (write-line "    multiple_select = false;" f)
+  (write-line "  }" f)
+  (write-line "  : text {" f)
+  (write-line "    label = \"Edit selected line:\";" f)
+  (write-line "  }" f)
+  (write-line "  : edit_box {" f)
+  (write-line "    key = \"edit_text\";" f)
+  (write-line "    edit_width = 80;" f)
+  (write-line "    edit_limit = 2000;" f)
+  (write-line "  }" f)
+  (write-line "  : row {" f)
+  (write-line "    : button {" f)
+  (write-line "      key = \"update\";" f)
+  (write-line "      label = \"Update Line\";" f)
+  (write-line "      fixed_width = true;" f)
+  (write-line "    }" f)
+  (write-line "    : button {" f)
+  (write-line "      key = \"apply\";" f)
+  (write-line "      label = \"Apply All Changes\";" f)
+  (write-line "      is_default = true;" f)
+  (write-line "      fixed_width = true;" f)
+  (write-line "    }" f)
+  (write-line "    : button {" f)
+  (write-line "      key = \"cancel\";" f)
+  (write-line "      label = \"Cancel\";" f)
+  (write-line "      is_cancel = true;" f)
+  (write-line "      fixed_width = true;" f)
+  (write-line "    }" f)
+  (write-line "  }" f)
+  (write-line "}" f)
+  (close f)
+  
+  ;; Load and show dialog
+  (setq dcl-id (load_dialog dcl-file))
+  
+  (if (not (new_dialog "adzze_edit" dcl-id))
+    (progn
+      (princ "\nError: Cannot load dialog.")
+      (setq result nil)
+    )
+    (progn
+      ;; Populate list
+      (start_list "text_list")
+      (mapcar 'add_list text-lines)
+      (end_list)
+      
+      ;; Set initial selection
+      (set_tile "text_list" "0")
+      (set_tile "edit_text" (nth 0 text-lines))
+      
+      ;; Action for list selection
+      (action_tile "text_list"
+        "(progn
+           (setq current-idx (atoi $value))
+           (set_tile \"edit_text\" (nth current-idx text-lines))
+         )")
+      
+      ;; Action for Update button
+      (action_tile "update"
+        "(progn
+           (setq edit-value (get_tile \"edit_text\"))
+           (setq text-lines (subst-nth current-idx edit-value text-lines))
+           (setq modified-flags (subst-nth current-idx t modified-flags))
+           (start_list \"text_list\")
+           (mapcar 'add_list text-lines)
+           (end_list)
+           (set_tile \"text_list\" (itoa current-idx))
+         )")
+      
+      ;; Action for Apply button
+      (action_tile "apply"
+        "(progn
+           (setq edit-value (get_tile \"edit_text\"))
+           (setq text-lines (subst-nth current-idx edit-value text-lines))
+           (setq modified-flags (subst-nth current-idx t modified-flags))
+           (done_dialog 1)
+         )")
+      
+      ;; Action for Cancel button
+      (action_tile "cancel" "(done_dialog 0)")
+      
+      ;; Show dialog
+      (setq result (start_dialog))
+      (unload_dialog dcl-id)
+    )
+  )
+  
+  ;; Delete temporary DCL file
+  (vl-file-delete dcl-file)
+  
+  ;; Return modified data if user clicked Apply
+  (if (= result 1)
+    (mapcar '(lambda (item line) (list (cadr item) line)) text-data text-lines)
+    nil
+  )
+)
+
+;; ── Helper: substitute nth element in list ───────────────────
+
+(defun subst-nth (n new-val lst / i result)
+  (setq i 0)
+  (setq result '())
+  (foreach item lst
+    (if (= i n)
+      (setq result (append result (list new-val)))
+      (setq result (append result (list item)))
+    )
+    (setq i (1+ i))
+  )
+  result
+)
+
+;; ── Apply modified text to drawing ───────────────────────────
+
+(defun apply-modified-text-adzze (modified-data / modified-count ent new-text ent-type ent-data vla-obj)
+  (setq modified-count 0)
+  
+  (foreach item modified-data
+    (setq ent (car item))
+    (setq new-text (cadr item))
+    (setq ent-type (cdr (assoc 0 (entget ent))))
+    
+    (cond
+      ;; TEXT object
+      ((= ent-type "TEXT")
+       (setq ent-data (entget ent))
+       (setq ent-data (subst (cons 1 new-text) (assoc 1 ent-data) ent-data))
+       (entmod ent-data)
+       (entupd ent)
+       (setq modified-count (1+ modified-count))
+      )
+      
+      ;; MTEXT object
+      ((= ent-type "MTEXT")
+       (setq vla-obj (vlax-ename->vla-object ent))
+       (vla-put-TextString vla-obj new-text)
+       (entupd ent)
+       (setq modified-count (1+ modified-count))
+      )
+    )
+  )
+  
+  modified-count
+)
+
+;; ── Clean up MTEXT formatting ────────────────────────────────
+
+(defun cleanup-mtext-adzze (text / result)
+  (setq result text)
+  
+  ;; Replace \P with newline
+  (while (vl-string-search "\\P" result)
+    (setq result (vl-string-subst "\n" "\\P" result))
+  )
+  
+  (while (vl-string-search "\\p" result)
+    (setq result (vl-string-subst "\n" "\\p" result))
+  )
+  
+  result
+)
+
+(princ "\nCommand ADZZE loaded. Type ADZZE to extract and edit text.")
+(princ)
