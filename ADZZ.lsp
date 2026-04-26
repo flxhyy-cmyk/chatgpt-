@@ -1037,13 +1037,36 @@
 ;;; ─────────────────────────────────────────────────────────────
 ;;; ADZZE - Extract and Edit Text Content (DCL Native)
 ;;; Function: Extract text and edit in DCL dialog with list view
+;;; v2: Common phrases organized into named category tabs
 ;;; ─────────────────────────────────────────────────────────────
 
 ;@name 提取并编辑文字
 ;@group 文本编辑
-;@desc 提取文字到DCL对话框，逐个编辑后写回图纸（无编码问题）
+;@desc 提取文字到DCL对话框，逐个编辑后写回图纸；候选词支持分类标签管理
 ;@require Selection
 ;@require ModelSpace
+
+;; ── Global dialog state (shared between action_tile callbacks) ──
+(setq *ADZZE_CATS*        nil)  ;; ((cat-name phrase ...) ...)  – all categories
+(setq *ADZZE_CUR_CAT*     0  )  ;; currently selected category index
+(setq *ADZZE_CUR_PHRASES* nil)  ;; phrases of the selected category
+(setq *ADZZE_TEXT_LINES*  nil)  ;; text lines being edited in the dialog
+(setq *ADZZE_CUR_IDX*     0  )  ;; selected row in text_list
+(setq *ADZZE_COMMON_IDX*  0  )  ;; selected row in common_list
+
+;; ── Helper: return only the category names ────────────────────
+(defun adzze-get-cat-names ()
+  (mapcar 'car *ADZZE_CATS*)
+)
+
+;; ── Helper: overwrite phrases of one category and persist ─────
+(defun adzze-update-cat-phrases (cat-idx new-phrases)
+  (setq *ADZZE_CATS*
+    (subst-nth cat-idx
+      (cons (car (nth cat-idx *ADZZE_CATS*)) new-phrases)
+      *ADZZE_CATS*))
+  (save-common-phrases-adzze *ADZZE_CATS*)
+)
 
 (defun c:ADZZE ()
   (setq ss nil)
@@ -1224,242 +1247,295 @@
   )
 )
 
-;; ── Show DCL text editor with common phrases ─────────────────
+;; ── DCL dialog: text editor (left) + category/phrase panel (right) ─
 
-(defun show-text-editor-dcl-adzze (text-data / dcl-file dcl-id result text-lines current-idx edit-value modified-flags common-phrases common-idx new-phrase old-dynmode)
-  (setq dcl-file (vl-filename-mktemp nil nil ".dcl"))
-  (setq text-lines (mapcar 'caddr text-data))  ;; Extract text content
-  (setq modified-flags (mapcar '(lambda (x) nil) text-data))  ;; Track modifications
-  (setq current-idx 0)
-  (setq common-idx 0)
-  
-  ;; Save and disable dynamic input to prevent tooltip freeze
+(defun show-text-editor-dcl-adzze (text-data / dcl-file dcl-id result old-dynmode)
+
+  ;; ── Initialise global dialog state ──────────────────────────
+  (setq *ADZZE_CATS*        (load-common-phrases-adzze))
+  (setq *ADZZE_CUR_CAT*     0)
+  (setq *ADZZE_CUR_PHRASES* (if *ADZZE_CATS* (cdr (car *ADZZE_CATS*)) nil))
+  (setq *ADZZE_TEXT_LINES*  (mapcar 'caddr text-data))
+  (setq *ADZZE_CUR_IDX*     0)
+  (setq *ADZZE_COMMON_IDX*  0)
+
+  ;; Disable dynamic input to prevent tooltip freeze
   (setq old-dynmode (getvar "DYNMODE"))
   (setvar "DYNMODE" 0)
-  
-  ;; Load common phrases from config file
-  (setq common-phrases (load-common-phrases-adzze))
-  
-  ;; Create DCL file
+
+  ;; ── Write DCL file ───────────────────────────────────────────
+  (setq dcl-file (vl-filename-mktemp nil nil ".dcl"))
   (setq f (open dcl-file "w"))
+
   (write-line "adzze_edit : dialog {" f)
-  (write-line "  label = \"ADZZE - Edit Text Content\";" f)
+  (write-line "  label = \"ADZZE - Edit Text  |  候选词分类管理\";" f)
+
   (write-line "  : row {" f)
-  
-  ;; Left column - Text editing area
+
+  ;; ── LEFT COLUMN: text list + editor ─────────────────────────
   (write-line "    : column {" f)
-  (write-line "      : text {" f)
-  (write-line "        label = \"Select a line to edit (top to bottom):\";" f)
-  (write-line "      }" f)
+  (write-line "      : text { label = \"文字列表（从上到下）/ Lines (top→bottom):\"; }" f)
   (write-line "      : list_box {" f)
   (write-line "        key = \"text_list\";" f)
-  (write-line "        width = 60;" f)
+  (write-line "        width = 58;" f)
   (write-line "        height = 15;" f)
   (write-line "        fixed_width_font = true;" f)
   (write-line "        multiple_select = false;" f)
   (write-line "      }" f)
-  (write-line "      : text {" f)
-  (write-line "        label = \"Edit selected line:\";" f)
-  (write-line "      }" f)
+  (write-line "      : text { label = \"编辑选中行 / Edit selected line:\"; }" f)
   (write-line "      : edit_box {" f)
   (write-line "        key = \"edit_text\";" f)
-  (write-line "        edit_width = 60;" f)
+  (write-line "        edit_width = 58;" f)
   (write-line "        edit_limit = 2000;" f)
   (write-line "      }" f)
   (write-line "    }" f)
-  
-  ;; Right column - Common phrases area
+
+  ;; ── RIGHT COLUMN: category tabs + phrase list ────────────────
   (write-line "    : column {" f)
-  (write-line "      : text {" f)
-  (write-line "        label = \"Common Phrases (double-click to use):\";" f)
+
+  ;; Category list (acts as tab selector)
+  (write-line "      : text { label = \"分类标签 / Categories:\"; }" f)
+  (write-line "      : list_box {" f)
+  (write-line "        key = \"cat_list\";" f)
+  (write-line "        width = 30;" f)
+  (write-line "        height = 6;" f)
+  (write-line "        multiple_select = false;" f)
   (write-line "      }" f)
+  ;; Category management row
+  (write-line "      : row {" f)
+  (write-line "        : edit_box { key = \"new_cat\"; edit_width = 14; }" f)
+  (write-line "        : button { key = \"add_cat\"; label = \"新增分类\"; fixed_width = true; width = 10; }" f)
+  (write-line "        : button { key = \"del_cat\"; label = \"删除\"; fixed_width = true; width = 6; }" f)
+  (write-line "      }" f)
+
+  (write-line "      : text { label = \"────────────────────────────\"; }" f)
+
+  ;; Phrase list for selected category
+  (write-line "      : text { label = \"候选文字（双击使用）/ Phrases (dbl-click):\"; }" f)
   (write-line "      : list_box {" f)
   (write-line "        key = \"common_list\";" f)
   (write-line "        width = 30;" f)
-  (write-line "        height = 15;" f)
-  (write-line "        fixed_width_font = true;" f)
+  (write-line "        height = 9;" f)
   (write-line "        multiple_select = false;" f)
   (write-line "      }" f)
+  ;; Phrase management row
   (write-line "      : row {" f)
-  (write-line "        : button {" f)
-  (write-line "          key = \"add_phrase\";" f)
-  (write-line "          label = \"Add\";" f)
-  (write-line "          fixed_width = true;" f)
-  (write-line "          width = 8;" f)
-  (write-line "        }" f)
-  (write-line "        : button {" f)
-  (write-line "          key = \"del_phrase\";" f)
-  (write-line "          label = \"Delete\";" f)
-  (write-line "          fixed_width = true;" f)
-  (write-line "          width = 8;" f)
-  (write-line "        }" f)
+  (write-line "        : edit_box { key = \"new_phrase\"; edit_width = 14; }" f)
+  (write-line "        : button { key = \"add_phrase\"; label = \"添加词条\"; fixed_width = true; width = 10; }" f)
+  (write-line "        : button { key = \"del_phrase\"; label = \"删除\"; fixed_width = true; width = 6; }" f)
   (write-line "      }" f)
-  (write-line "      : edit_box {" f)
-  (write-line "        key = \"new_phrase\";" f)
-  (write-line "        label = \"New phrase:\";" f)
-  (write-line "        edit_width = 30;" f)
-  (write-line "      }" f)
-  (write-line "    }" f)
-  
-  (write-line "  }" f)
-  
-  ;; Bottom buttons
+
+  (write-line "    }" f)   ;; end right column
+  (write-line "  }" f)     ;; end row
+
+  ;; Bottom action buttons
   (write-line "  : row {" f)
-  (write-line "    : button {" f)
-  (write-line "      key = \"update\";" f)
-  (write-line "      label = \"Update Line\";" f)
-  (write-line "      fixed_width = true;" f)
-  (write-line "    }" f)
-  (write-line "    : button {" f)
-  (write-line "      key = \"apply\";" f)
-  (write-line "      label = \"Apply All Changes\";" f)
-  (write-line "      is_default = true;" f)
-  (write-line "      fixed_width = true;" f)
-  (write-line "    }" f)
-  (write-line "    : button {" f)
-  (write-line "      key = \"cancel\";" f)
-  (write-line "      label = \"Cancel\";" f)
-  (write-line "      is_cancel = true;" f)
-  (write-line "      fixed_width = true;" f)
-  (write-line "    }" f)
+  (write-line "    : button { key = \"update\"; label = \"更新当前行 Update\"; fixed_width = true; }" f)
+  (write-line "    : button { key = \"apply\"; label = \"应用全部 Apply All\"; is_default = true; fixed_width = true; }" f)
+  (write-line "    : button { key = \"cancel\"; label = \"取消 Cancel\"; is_cancel = true; fixed_width = true; }" f)
   (write-line "  }" f)
+
   (write-line "}" f)
   (close f)
-  
-  ;; Load and show dialog
+
+  ;; ── Load and initialise dialog ───────────────────────────────
   (setq dcl-id (load_dialog dcl-file))
-  
+
   (if (not (new_dialog "adzze_edit" dcl-id))
     (progn
-      (princ "\nError: Cannot load dialog.")
+      (princ "\nError: Cannot load ADZZE dialog.")
       (setq result nil)
     )
     (progn
+
       ;; Populate text list
       (start_list "text_list")
-      (mapcar 'add_list text-lines)
+      (mapcar 'add_list *ADZZE_TEXT_LINES*)
       (end_list)
-      
-      ;; Populate common phrases list
-      (start_list "common_list")
-      (mapcar 'add_list common-phrases)
-      (end_list)
-      
-      ;; Set initial selection
       (set_tile "text_list" "0")
-      (set_tile "edit_text" (nth 0 text-lines))
-      
-      ;; Action for text list selection - auto save before switching
-      (action_tile "text_list"
+      (set_tile "edit_text" (nth 0 *ADZZE_TEXT_LINES*))
+
+      ;; Populate category list
+      (start_list "cat_list")
+      (if *ADZZE_CATS* (mapcar 'add_list (adzze-get-cat-names)))
+      (end_list)
+      (if *ADZZE_CATS* (set_tile "cat_list" "0"))
+
+      ;; Populate phrase list for first category
+      (start_list "common_list")
+      (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
+      (end_list)
+
+      ;; ── ACTION: switch category (acts like clicking a tab) ────
+      (action_tile "cat_list"
         "(progn
-           (setq edit-value (get_tile \"edit_text\"))
-           (if (not (equal edit-value (nth current-idx text-lines)))
+           (setq *ADZZE_CUR_CAT* (atoi $value))
+           (setq *ADZZE_CUR_PHRASES*
+             (if *ADZZE_CATS* (cdr (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)) nil))
+           (setq *ADZZE_COMMON_IDX* 0)
+           (start_list \"common_list\")
+           (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
+           (end_list)
+         )")
+
+      ;; ── ACTION: add new category ──────────────────────────────
+      (action_tile "add_cat"
+        "(progn
+           (setq *adzze-nc* (get_tile \"new_cat\"))
+           (if (and *adzze-nc* (> (strlen *adzze-nc*) 0))
              (progn
-               (setq text-lines (subst-nth current-idx edit-value text-lines))
-               (setq modified-flags (subst-nth current-idx t modified-flags))
+               (setq *ADZZE_CATS* (append *ADZZE_CATS* (list (list *adzze-nc*))))
+               (save-common-phrases-adzze *ADZZE_CATS*)
+               (set_tile \"new_cat\" \"\")
+               (setq *ADZZE_CUR_CAT* (1- (length *ADZZE_CATS*)))
+               (setq *ADZZE_CUR_PHRASES* nil)
+               (start_list \"cat_list\")
+               (mapcar 'add_list (adzze-get-cat-names))
+               (end_list)
+               (set_tile \"cat_list\" (itoa *ADZZE_CUR_CAT*))
+               (start_list \"common_list\")
+               (end_list)
              )
            )
-           (setq current-idx (atoi $value))
-           (set_tile \"edit_text\" (nth current-idx text-lines))
-           (start_list \"text_list\")
-           (mapcar 'add_list text-lines)
-           (end_list)
-           (set_tile \"text_list\" (itoa current-idx))
          )")
-      
-      ;; Action for common phrases list - double click to replace
+
+      ;; ── ACTION: delete selected category ─────────────────────
+      (action_tile "del_cat"
+        "(progn
+           (if (and *ADZZE_CATS* (>= *ADZZE_CUR_CAT* 0) (< *ADZZE_CUR_CAT* (length *ADZZE_CATS*)))
+             (progn
+               (setq *ADZZE_CATS* (remove-nth *ADZZE_CUR_CAT* *ADZZE_CATS*))
+               (save-common-phrases-adzze *ADZZE_CATS*)
+               (if (>= *ADZZE_CUR_CAT* (length *ADZZE_CATS*))
+                 (setq *ADZZE_CUR_CAT* (max 0 (1- (length *ADZZE_CATS*))))
+               )
+               (setq *ADZZE_CUR_PHRASES*
+                 (if *ADZZE_CATS* (cdr (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)) nil))
+               (setq *ADZZE_COMMON_IDX* 0)
+               (start_list \"cat_list\")
+               (if *ADZZE_CATS* (mapcar 'add_list (adzze-get-cat-names)))
+               (end_list)
+               (if *ADZZE_CATS* (set_tile \"cat_list\" (itoa *ADZZE_CUR_CAT*)))
+               (start_list \"common_list\")
+               (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
+               (end_list)
+             )
+           )
+         )")
+
+      ;; ── ACTION: phrase list – double-click inserts into editor ─
       (action_tile "common_list"
         "(progn
-           (setq common-idx (atoi $value))
+           (setq *ADZZE_COMMON_IDX* (atoi $value))
            (if (= $reason 4)
              (progn
-               (setq edit-value (nth common-idx common-phrases))
-               (set_tile \"edit_text\" edit-value)
-               (setq text-lines (subst-nth current-idx edit-value text-lines))
-               (setq modified-flags (subst-nth current-idx t modified-flags))
-               (start_list \"text_list\")
-               (mapcar 'add_list text-lines)
-               (end_list)
-               (set_tile \"text_list\" (itoa current-idx))
+               (setq *adzze-p* (nth *ADZZE_COMMON_IDX* *ADZZE_CUR_PHRASES*))
+               (if *adzze-p*
+                 (progn
+                   (set_tile \"edit_text\" *adzze-p*)
+                   (setq *ADZZE_TEXT_LINES*
+                     (subst-nth *ADZZE_CUR_IDX* *adzze-p* *ADZZE_TEXT_LINES*))
+                   (start_list \"text_list\")
+                   (mapcar 'add_list *ADZZE_TEXT_LINES*)
+                   (end_list)
+                   (set_tile \"text_list\" (itoa *ADZZE_CUR_IDX*))
+                 )
+               )
              )
            )
          )")
-      
-      ;; Action for Add phrase button
+
+      ;; ── ACTION: add phrase to current category ────────────────
       (action_tile "add_phrase"
         "(progn
-           (setq new-phrase (get_tile \"new_phrase\"))
-           (if (and new-phrase (> (strlen new-phrase) 0))
+           (setq *adzze-np* (get_tile \"new_phrase\"))
+           (if (and *adzze-np* (> (strlen *adzze-np*) 0) *ADZZE_CATS*)
              (progn
-               (setq common-phrases (append common-phrases (list new-phrase)))
-               (save-common-phrases-adzze common-phrases)
-               (start_list \"common_list\")
-               (mapcar 'add_list common-phrases)
-               (end_list)
+               (setq *ADZZE_CUR_PHRASES*
+                 (append *ADZZE_CUR_PHRASES* (list *adzze-np*)))
+               (adzze-update-cat-phrases *ADZZE_CUR_CAT* *ADZZE_CUR_PHRASES*)
                (set_tile \"new_phrase\" \"\")
+               (start_list \"common_list\")
+               (mapcar 'add_list *ADZZE_CUR_PHRASES*)
+               (end_list)
              )
            )
          )")
-      
-      ;; Action for Delete phrase button
+
+      ;; ── ACTION: delete selected phrase ────────────────────────
       (action_tile "del_phrase"
         "(progn
-           (if (and common-phrases (>= common-idx 0) (< common-idx (length common-phrases)))
+           (if (and *ADZZE_CUR_PHRASES*
+                    (>= *ADZZE_COMMON_IDX* 0)
+                    (< *ADZZE_COMMON_IDX* (length *ADZZE_CUR_PHRASES*)))
              (progn
-               (setq common-phrases (remove-nth common-idx common-phrases))
-               (save-common-phrases-adzze common-phrases)
+               (setq *ADZZE_CUR_PHRASES*
+                 (remove-nth *ADZZE_COMMON_IDX* *ADZZE_CUR_PHRASES*))
+               (adzze-update-cat-phrases *ADZZE_CUR_CAT* *ADZZE_CUR_PHRASES*)
+               (if (>= *ADZZE_COMMON_IDX* (length *ADZZE_CUR_PHRASES*))
+                 (setq *ADZZE_COMMON_IDX* (max 0 (1- (length *ADZZE_CUR_PHRASES*))))
+               )
                (start_list \"common_list\")
-               (mapcar 'add_list common-phrases)
+               (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
                (end_list)
-               (if (>= common-idx (length common-phrases))
-                 (setq common-idx (max 0 (1- (length common-phrases))))
-               )
-               (if common-phrases
-                 (set_tile \"common_list\" (itoa common-idx))
-               )
+               (if *ADZZE_CUR_PHRASES*
+                 (set_tile \"common_list\" (itoa *ADZZE_COMMON_IDX*)))
              )
            )
          )")
-      
-      ;; Action for Update button
+
+      ;; ── ACTION: select line in text list (auto-save current) ──
+      (action_tile "text_list"
+        "(progn
+           (setq *adzze-ev* (get_tile \"edit_text\"))
+           (if (not (equal *adzze-ev* (nth *ADZZE_CUR_IDX* *ADZZE_TEXT_LINES*)))
+             (setq *ADZZE_TEXT_LINES*
+               (subst-nth *ADZZE_CUR_IDX* *adzze-ev* *ADZZE_TEXT_LINES*))
+           )
+           (setq *ADZZE_CUR_IDX* (atoi $value))
+           (set_tile \"edit_text\" (nth *ADZZE_CUR_IDX* *ADZZE_TEXT_LINES*))
+           (start_list \"text_list\")
+           (mapcar 'add_list *ADZZE_TEXT_LINES*)
+           (end_list)
+           (set_tile \"text_list\" (itoa *ADZZE_CUR_IDX*))
+         )")
+
+      ;; ── ACTION: update current line ───────────────────────────
       (action_tile "update"
         "(progn
-           (setq edit-value (get_tile \"edit_text\"))
-           (setq text-lines (subst-nth current-idx edit-value text-lines))
-           (setq modified-flags (subst-nth current-idx t modified-flags))
+           (setq *adzze-ev* (get_tile \"edit_text\"))
+           (setq *ADZZE_TEXT_LINES*
+             (subst-nth *ADZZE_CUR_IDX* *adzze-ev* *ADZZE_TEXT_LINES*))
            (start_list \"text_list\")
-           (mapcar 'add_list text-lines)
+           (mapcar 'add_list *ADZZE_TEXT_LINES*)
            (end_list)
-           (set_tile \"text_list\" (itoa current-idx))
+           (set_tile \"text_list\" (itoa *ADZZE_CUR_IDX*))
          )")
-      
-      ;; Action for Apply button
+
+      ;; ── ACTION: apply all & close ─────────────────────────────
       (action_tile "apply"
         "(progn
-           (setq edit-value (get_tile \"edit_text\"))
-           (setq text-lines (subst-nth current-idx edit-value text-lines))
-           (setq modified-flags (subst-nth current-idx t modified-flags))
+           (setq *adzze-ev* (get_tile \"edit_text\"))
+           (setq *ADZZE_TEXT_LINES*
+             (subst-nth *ADZZE_CUR_IDX* *adzze-ev* *ADZZE_TEXT_LINES*))
            (done_dialog 1)
          )")
-      
-      ;; Action for Cancel button
+
       (action_tile "cancel" "(done_dialog 0)")
-      
-      ;; Show dialog
+
       (setq result (start_dialog))
       (unload_dialog dcl-id)
     )
   )
-  
-  ;; Delete temporary DCL file
+
+  ;; Cleanup
   (vl-file-delete dcl-file)
-  
-  ;; Restore dynamic input mode
   (setvar "DYNMODE" old-dynmode)
-  
-  ;; Return modified data if user clicked Apply
+
+  ;; Return (entity . new-text) pairs if user clicked Apply
   (if (= result 1)
-    (mapcar '(lambda (item line) (list (cadr item) line)) text-data text-lines)
+    (mapcar '(lambda (item line) (list (cadr item) line))
+            text-data *ADZZE_TEXT_LINES*)
     nil
   )
 )
@@ -1525,46 +1601,89 @@
   result
 )
 
-;; ── Load common phrases from config file ─────────────────────
+;; ── Load common phrases with categories ──────────────────────
+;; Config file format:
+;;   [CategoryName]
+;;   phrase1
+;;   phrase2
+;;   [AnotherCategory]
+;;   ...
+;; Returns: ((cat-name phrase1 phrase2 ...) ...)
 
-(defun load-common-phrases-adzze (/ config-file phrases f line)
+(defun load-common-phrases-adzze (/ config-file cats f line cur-cat cur-phrases)
   (setq config-file (strcat (getenv "APPDATA") "\\ADZZE_CommonPhrases.txt"))
-  (setq phrases '())
-  
+  (setq cats       '())
+  (setq cur-cat    nil)
+  (setq cur-phrases '())
+
   (if (findfile config-file)
     (progn
       (setq f (open config-file "r"))
       (if f
         (progn
           (while (setq line (read-line f))
-            (if (> (strlen line) 0)
-              (setq phrases (append phrases (list line)))
+            (cond
+              ;; Category header line: [CategoryName]
+              ((and (> (strlen line) 2)
+                    (= (substr line 1 1) "[")
+                    (vl-string-search "]" line))
+               ;; Save previous category before starting a new one
+               (if cur-cat
+                 (setq cats (append cats
+                   (list (cons cur-cat (reverse cur-phrases)))))
+               )
+               ;; Extract name between [ and ]
+               (setq cur-cat
+                 (substr line 2 (- (strlen line) 2)))
+               (setq cur-phrases '())
+              )
+              ;; Phrase line (non-empty)
+              ((and cur-cat (> (strlen line) 0))
+               (setq cur-phrases (cons line cur-phrases))
+              )
             )
+          )
+          ;; Save last category
+          (if cur-cat
+            (setq cats (append cats
+              (list (cons cur-cat (reverse cur-phrases)))))
           )
           (close f)
         )
       )
     )
-    ;; Create default phrases if file doesn't exist
+  )
+
+  ;; If nothing loaded, create sensible defaults
+  (if (null cats)
     (progn
-      (setq phrases '("待定" "核实" "修改" "确认" "删除" "保留"))
-      (save-common-phrases-adzze phrases)
+      (setq cats
+        (list
+          (list "常用"   "待定" "核实" "修改" "确认" "删除" "保留")
+          (list "状态"   "已完成" "进行中" "未开始" "已取消")
+          (list "审核"   "符合要求" "需要复核" "请设计师确认" "按图施工")
+        ))
+      (save-common-phrases-adzze cats)
     )
   )
-  
-  phrases
+
+  cats
 )
 
-;; ── Save common phrases to config file ───────────────────────
+;; ── Save common phrases with categories to config file ────────
 
-(defun save-common-phrases-adzze (phrases / config-file f)
+(defun save-common-phrases-adzze (cats / config-file f)
   (setq config-file (strcat (getenv "APPDATA") "\\ADZZE_CommonPhrases.txt"))
-  
   (setq f (open config-file "w"))
   (if f
     (progn
-      (foreach phrase phrases
-        (write-line phrase f)
+      (foreach cat-entry cats
+        ;; Write [CategoryName]
+        (write-line (strcat "[" (car cat-entry) "]") f)
+        ;; Write each phrase
+        (foreach phrase (cdr cat-entry)
+          (write-line phrase f)
+        )
       )
       (close f)
       t
