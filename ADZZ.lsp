@@ -877,6 +877,13 @@
         
         (if text-data
           (progn
+            ;; Auto copy to clipboard
+            (setq text-lines (mapcar 'caddr text-data))
+            (if (auto-copy-to-clipboard-adzze text-lines)
+              (princ "\nText content automatically copied to clipboard!")
+              (princ "\nNote: Auto-copy to clipboard not available. You can manually copy from the dialog.")
+            )
+            
             ;; Show DCL editor
             (setq modified-data (show-text-editor-dcl-adzze text-data))
             
@@ -897,6 +904,32 @@
   )
   
   (princ)
+)
+
+;; ── Auto copy text to clipboard (using DATA EXTRACTION method) ──
+
+(defun auto-copy-to-clipboard-adzze (text-lines / all-text data-obj)
+  ;; Combine all lines with newline
+  (setq all-text "")
+  (foreach line text-lines
+    (setq all-text (strcat all-text line "\n"))
+  )
+  
+  ;; Try using COM object to access clipboard
+  (if (and (setq data-obj (vlax-create-object "htmlfile"))
+           (setq window-obj (vlax-get-property data-obj 'parentWindow)))
+    (progn
+      (vlax-invoke-method 
+        (vlax-get-property window-obj 'clipboardData) 
+        'setData 
+        "text" 
+        all-text)
+      (vlax-release-object data-obj)
+      t
+    )
+    ;; Fallback: return nil if COM method fails
+    nil
+  )
 )
 
 ;; ── Extract text with entity references ──────────────────────
@@ -1070,6 +1103,38 @@
     (mapcar '(lambda (item line) (list (cadr item) line)) text-data text-lines)
     nil
   )
+)
+
+;; ── Copy text to clipboard ───────────────────────────────────
+
+(defun copy-to-clipboard-adzze (text-lines / all-text vbs-file)
+  ;; Combine all lines with newline
+  (setq all-text "")
+  (foreach line text-lines
+    (setq all-text (strcat all-text line "\n"))
+  )
+  
+  ;; Escape quotes for VBScript
+  (while (vl-string-search "\"" all-text)
+    (setq all-text (vl-string-subst "\"\"" "\"" all-text))
+  )
+  
+  ;; Create VBScript to copy to clipboard
+  (setq vbs-file (strcat (getenv "TEMP") "\\adzze_copy.vbs"))
+  
+  (setq f (open vbs-file "w"))
+  (write-line "Set objHTML = CreateObject(\"htmlfile\")" f)
+  (write-line "Set objWindow = objHTML.parentWindow" f)
+  (write-line (strcat "strText = \"" all-text "\"") f)
+  (write-line "objWindow.clipboardData.SetData \"text\", strText" f)
+  (close f)
+  
+  ;; Execute VBScript
+  (startapp "wscript.exe" (strcat "\"" vbs-file "\""))
+  
+  ;; Note: VBS file will remain, but it's small and in temp folder
+  
+  t
 )
 
 ;; ── Helper: substitute nth element in list ───────────────────
