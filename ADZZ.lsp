@@ -313,7 +313,7 @@
 )
 
 ;; Show alignment dialog
-(defun show-alignment-dialog-adzz (/ dcl-file dcl-id result alignment-value)
+(defun show-alignment-dialog-adzz (/ dcl-file dcl-id result alignment-value f)
   (setq dcl-file (vl-filename-mktemp nil nil ".dcl"))
   (setq alignment-value "1")  ; Default: center
   
@@ -546,7 +546,7 @@
 
 ;; ── DCL Dialog ───────────────────────────────────────────────
 
-(defun show-height-dialog-adzzr (/ dcl-file dcl-id result chosen-height scope-val custom-val)
+(defun show-height-dialog-adzzr (/ dcl-file dcl-id result chosen-height scope-val custom-val f)
   (setq dcl-file (vl-filename-mktemp nil nil ".dcl"))
   (setq chosen-height "0")   ;; 0 = custom
   (setq custom-val   "3.5")  ;; default custom input
@@ -1344,12 +1344,20 @@
 
 ;; ── DCL dialog: text editor (left) + category/phrase panel (right) ─
 
-(defun show-text-editor-dcl-adzze (text-data / dcl-file dcl-id result old-dynmode)
+(defun show-text-editor-dcl-adzze (text-data / dcl-file dcl-id result old-dynmode f)
 
   ;; ── Initialise global dialog state ──────────────────────────
   (setq *ADZZE_CATS*        (load-common-phrases-adzze))
-  (setq *ADZZE_CUR_CAT*     0)
-  (setq *ADZZE_CUR_PHRASES* (if *ADZZE_CATS* (cdr (car *ADZZE_CATS*)) nil))
+  
+  ;; If *ADZZE_CUR_CAT* is not set or invalid, default to 0
+  ;; This allows external functions to pre-set the category before calling this dialog
+  (if (or (not *ADZZE_CUR_CAT*)
+          (< *ADZZE_CUR_CAT* 0)
+          (>= *ADZZE_CUR_CAT* (length *ADZZE_CATS*)))
+    (setq *ADZZE_CUR_CAT* 0)
+  )
+  
+  (setq *ADZZE_CUR_PHRASES* (if *ADZZE_CATS* (cdr (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)) nil))
   (setq *ADZZE_TEXT_LINES*  (mapcar 'caddr text-data))
   (setq *ADZZE_CUR_IDX*     0)
   (setq *ADZZE_COMMON_IDX*  0)
@@ -1956,6 +1964,10 @@
       ;; Reload to ensure sync
       (setq *ADZZE_CATS* (load-common-phrases-adzze))
       
+      ;; Set current category to "临时" so dialog will show it when reopened
+      (setq *ADZZE_CUR_CAT* (adzze-find-temp-cat))
+      (setq *ADZZE_CUR_PHRASES* (if *ADZZE_CUR_CAT* (cdr (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)) nil))
+      
       (princ (strcat "\n已替换临时候选区，共 " (itoa new-count) " 个文字"))
     )
     (princ "\n未选择任何文字对象")
@@ -2087,9 +2099,10 @@
           (while (setq line (read-line f))
             (cond
               ;; Category header line: [CategoryName]
+              ;; MUST start with [ AND end with ] to avoid false positives like "[ATTRIB] text"
               ((and (> (strlen line) 2)
                     (= (substr line 1 1) "[")
-                    (vl-string-search "]" line))
+                    (= (substr line (strlen line) 1) "]"))
                ;; Save previous category before starting a new one
                (if cur-cat
                  (setq cats (append cats
