@@ -1059,6 +1059,30 @@
   (mapcar 'car *ADZZE_CATS*)
 )
 
+;; ── Helper: check if current category is "临时" ───────────────
+(defun adzze-is-temp-cat ()
+  (and *ADZZE_CATS*
+       (>= *ADZZE_CUR_CAT* 0)
+       (< *ADZZE_CUR_CAT* (length *ADZZE_CATS*))
+       (equal (car (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)) "临时"))
+)
+
+;; ── Helper: toggle button visibility based on category ────────
+(defun adzze-toggle-buttons ()
+  (if (adzze-is-temp-cat)
+    (progn
+      ;; Show temp buttons, hide normal buttons
+      (mode_tile "normal_buttons" 1)  ;; disable/hide
+      (mode_tile "temp_buttons" 0)    ;; enable/show
+    )
+    (progn
+      ;; Show normal buttons, hide temp buttons
+      (mode_tile "normal_buttons" 0)  ;; enable/show
+      (mode_tile "temp_buttons" 1)    ;; disable/hide
+    )
+  )
+)
+
 ;; ── Helper: overwrite phrases of one category and persist ─────
 (defun adzze-update-cat-phrases (cat-idx new-phrases)
   (setq *ADZZE_CATS*
@@ -1072,80 +1096,151 @@
   (setq ss nil)
   (setq text-ss nil)
   (setq text-count 0)
+  (setq continue-loop T)
   
   (princ "\n=== ADZZE Extract and Edit Text (DCL Native) ===")
-  (princ "\nSelect text objects to extract and edit: ")
-  (setq ss (ssget))
   
-  (cond
-    (ss
-     (setq text-ss (filter-text-objects-adzz ss))
-     
-     (cond
-       ((not text-ss)
-        (princ "\nNo TEXT or MTEXT objects found in selection!")
-       )
+  ;; Main loop for re-picking
+  (while continue-loop
+    (princ "\nSelect text objects to extract and edit: ")
+    (setq ss (ssget))
+    
+    (cond
+      (ss
+       (setq text-ss (filter-text-objects-adzz ss))
        
-       (t
-        ;; Handle both real entities and block text data
-        (if (equal text-ss 'block-text-only)
-          (progn
-            ;; Only block text, no real entities
-            (setq text-count (length *ADZZE_BLOCK_TEXT_DATA*))
-            (princ (strcat "\nExtracted " (itoa text-count) " text object(s) from blocks"))
-            
-            ;; Use block text data directly
-            (setq text-data *ADZZE_BLOCK_TEXT_DATA*)
-          )
-          (progn
-            ;; Real entities (may also have block text)
-            (setq text-count (sslength text-ss))
-            (if *ADZZE_BLOCK_TEXT_DATA*
-              (setq text-count (+ text-count (length *ADZZE_BLOCK_TEXT_DATA*)))
+       (cond
+         ((not text-ss)
+          (princ "\nNo TEXT or MTEXT objects found in selection!")
+          (setq continue-loop nil)
+         )
+         
+         (t
+          ;; Handle both real entities and block text data
+          (if (equal text-ss 'block-text-only)
+            (progn
+              ;; Only block text, no real entities
+              (setq text-count (length *ADZZE_BLOCK_TEXT_DATA*))
+              (princ (strcat "\nExtracted " (itoa text-count) " text object(s) from blocks"))
+              
+              ;; Use block text data directly
+              (setq text-data *ADZZE_BLOCK_TEXT_DATA*)
             )
-            (princ (strcat "\nFiltered " (itoa text-count) " text object(s)"))
-            
-            ;; Extract text with entities (sorted by Y position)
-            (setq text-data (extract-text-with-entities-adzze text-ss))
-            
-            ;; Merge with block text data
-            (if *ADZZE_BLOCK_TEXT_DATA*
-              (setq text-data (append text-data *ADZZE_BLOCK_TEXT_DATA*))
+            (progn
+              ;; Real entities (may also have block text)
+              (setq text-count (sslength text-ss))
+              (if *ADZZE_BLOCK_TEXT_DATA*
+                (setq text-count (+ text-count (length *ADZZE_BLOCK_TEXT_DATA*)))
+              )
+              (princ (strcat "\nFiltered " (itoa text-count) " text object(s)"))
+              
+              ;; Extract text with entities (sorted by Y position)
+              (setq text-data (extract-text-with-entities-adzze text-ss))
+              
+              ;; Merge with block text data
+              (if *ADZZE_BLOCK_TEXT_DATA*
+                (setq text-data (append text-data *ADZZE_BLOCK_TEXT_DATA*))
+              )
+              
+              ;; Re-sort by Y coordinate
+              (setq text-data (vl-sort text-data '(lambda (a b) (> (car a) (car b)))))
             )
-            
-            ;; Re-sort by Y coordinate
-            (setq text-data (vl-sort text-data '(lambda (a b) (> (car a) (car b)))))
           )
-        )
-        
-        (if text-data
-          (progn
-            ;; Auto copy to clipboard (silent)
-            (setq text-lines (mapcar 'caddr text-data))
-            (auto-copy-to-clipboard-adzze text-lines)
-            (princ "\n[Text copied to clipboard]")
-            
-            ;; Show DCL editor
-            (setq modified-data (show-text-editor-dcl-adzze text-data))
-            
-            (if modified-data
-              (progn
-                (setq modified-count (apply-modified-text-adzze modified-data))
-                (princ (strcat "\nSuccess! Modified " (itoa modified-count) " text object(s)"))
-                ;; Regenerate after dialog closes (if block text was modified)
-                (if (check-block-text-modified-adzze modified-data)
-                  (command "_.REGEN")
+          
+          (if text-data
+            (progn
+              ;; Auto copy to clipboard (silent)
+              (setq text-lines (mapcar 'caddr text-data))
+              (auto-copy-to-clipboard-adzze text-lines)
+              (princ "\n[Text copied to clipboard]")
+              
+              ;; Show DCL editor
+              (setq modified-data (show-text-editor-dcl-adzze text-data))
+              
+              (cond
+                ;; User clicked Re-pick
+                ((equal modified-data 'repick)
+                 (princ "\nRe-picking text...")
+                 ;; Loop continues
+                )
+                
+                ;; User clicked Pick Temp
+                ((equal modified-data 'pick-temp)
+                 ;; Loop to handle multiple pick-temp operations
+                 (setq pick-loop T)
+                 (while pick-loop
+                   (adzze-pick-temp-text)
+                   ;; Re-show dialog with same text data
+                   (setq modified-data (show-text-editor-dcl-adzze text-data))
+                   ;; Check result
+                   (cond
+                     ;; User clicked Pick Temp again - continue loop
+                     ((equal modified-data 'pick-temp)
+                      ;; Loop continues
+                     )
+                     ;; User clicked Re-pick - exit pick loop, continue main loop
+                     ((equal modified-data 'repick)
+                      (setq pick-loop nil)
+                      (princ "\nRe-picking text...")
+                     )
+                     ;; User clicked Apply - exit both loops
+                     (modified-data
+                      (setq pick-loop nil)
+                      (setq modified-count (apply-modified-text-adzze modified-data))
+                      (princ (strcat "\nSuccess! Modified " (itoa modified-count) " text object(s)"))
+                      (if (check-block-text-modified-adzze modified-data)
+                        (command "_.REGEN")
+                      )
+                      (setq continue-loop nil)
+                     )
+                     ;; User clicked Cancel - exit both loops
+                     (t
+                      (setq pick-loop nil)
+                      (princ "\nNo changes made.")
+                      (setq continue-loop nil)
+                     )
+                   )
+                 )
+                )
+                
+                ;; User clicked Replace All
+                ((equal modified-data 'replace-all)
+                 (adzze-replace-all-temp)
+                 ;; Exit without re-showing dialog
+                 (setq continue-loop nil)
+                )
+                
+                ;; User clicked Apply
+                (modified-data
+                 (setq modified-count (apply-modified-text-adzze modified-data))
+                 (princ (strcat "\nSuccess! Modified " (itoa modified-count) " text object(s)"))
+                 ;; Regenerate after dialog closes (if block text was modified)
+                 (if (check-block-text-modified-adzze modified-data)
+                   (command "_.REGEN")
+                 )
+                 (setq continue-loop nil)
+                )
+                
+                ;; User clicked Cancel
+                (t
+                 (princ "\nNo changes made.")
+                 (setq continue-loop nil)
                 )
               )
-              (princ "\nNo changes made.")
+            )
+            (progn
+              (princ "\nNo text content found!")
+              (setq continue-loop nil)
             )
           )
-          (princ "\nNo text content found!")
-        )
+         )
        )
-     )
+      )
+      (t 
+       (princ "\nNo objects selected.")
+       (setq continue-loop nil)
+      )
     )
-    (t (princ "\nNo objects selected."))
   )
   
   (princ)
@@ -1301,10 +1396,24 @@
   (write-line "        multiple_select = false;" f)
   (write-line "      }" f)
   ;; Phrase management row
+  (write-line "      : edit_box {" f)
+  (write-line "        key = \"new_phrase\";" f)
+  (write-line "        width = 38;" f)
+  (write-line "        fixed_width = true;" f)
+  (write-line "      }" f)
+  ;; Normal category buttons
   (write-line "      : row {" f)
-  (write-line "        : edit_box { key = \"new_phrase\"; edit_width = 12; }" f)
-  (write-line "        : button { key = \"add_phrase\"; label = \"添加\"; fixed_width = true; width = 6; }" f)
-  (write-line "        : button { key = \"del_phrase\"; label = \"删除\"; fixed_width = true; width = 6; }" f)
+  (write-line "        key = \"normal_buttons\";" f)
+  (write-line "        : button { key = \"add_phrase\"; label = \"添加\"; fixed_width = true; width = 8; }" f)
+  (write-line "        : button { key = \"open_file\"; label = \"打开\"; fixed_width = true; width = 8; }" f)
+  (write-line "        : button { key = \"del_phrase\"; label = \"删除\"; fixed_width = true; width = 8; }" f)
+  (write-line "      }" f)
+  ;; Temporary category buttons (initially hidden)
+  (write-line "      : row {" f)
+  (write-line "        key = \"temp_buttons\";" f)
+  (write-line "        : button { key = \"clear_temp\"; label = \"清除全部\"; fixed_width = true; width = 8; }" f)
+  (write-line "        : button { key = \"replace_all\"; label = \"全文替换\"; fixed_width = true; width = 8; }" f)
+  (write-line "        : button { key = \"pick_temp\"; label = \"拾取文字\"; fixed_width = true; width = 8; }" f)
   (write-line "      }" f)
   (write-line "    }" f)   ;; end middle column
 
@@ -1330,9 +1439,12 @@
 
   ;; Bottom action buttons
   (write-line "  : row {" f)
-  (write-line "    : button { key = \"update\"; label = \"更新当前行 Update\"; fixed_width = true; }" f)
-  (write-line "    : button { key = \"apply\"; label = \"应用全部 Apply All\"; is_default = true; fixed_width = true; }" f)
-  (write-line "    : button { key = \"cancel\"; label = \"取消 Cancel\"; is_cancel = true; fixed_width = true; }" f)
+  (write-line "    : column {" f)
+  (write-line "      : button { key = \"update\"; label = \"更新当前行 Update\"; fixed_width = true; width = 20; }" f)
+  (write-line "      : button { key = \"cancel\"; label = \"取消 Cancel\"; is_cancel = true; fixed_width = true; width = 20; }" f)
+  (write-line "    }" f)
+  (write-line "    : button { key = \"apply\"; label = \"应用全部\\nApply All\"; is_default = true; fixed_width = true; width = 20; height = 3; }" f)
+  (write-line "    : button { key = \"repick\"; label = \"重新拾取文字\\nRe-pick Text\"; fixed_width = true; width = 20; height = 3; }" f)
   (write-line "  }" f)
 
   (write-line "}" f)
@@ -1366,16 +1478,20 @@
       (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
       (end_list)
 
+      ;; Initialize phrase input box with first phrase (if exists)
+      (if (and *ADZZE_CUR_PHRASES* (> (length *ADZZE_CUR_PHRASES*) 0))
+        (set_tile "new_phrase" (nth 0 *ADZZE_CUR_PHRASES*))
+        (set_tile "new_phrase" "")
+      )
+
+      ;; Set initial button visibility
+      (adzze-toggle-buttons)
+
       ;; ── ACTION: switch category (acts like clicking a tab) ────
       (action_tile "cat_list"
         "(progn
            (setq *ADZZE_CUR_CAT* (atoi $value))
-           (setq *ADZZE_CUR_PHRASES*
-             (if *ADZZE_CATS* (cdr (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)) nil))
-           (setq *ADZZE_COMMON_IDX* 0)
-           (start_list \"common_list\")
-           (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
-           (end_list)
+           (adzze-switch-category)
          )")
 
       ;; ── ACTION: add new category ──────────────────────────────
@@ -1432,29 +1548,52 @@
            )
          )")
 
-      ;; ── ACTION: phrase list – double-click inserts into editor ─
+      ;; ── ACTION: phrase list – single-click shows, double-click inserts ─
       (action_tile "common_list"
         "(progn
+           ;; Update current index
            (setq *ADZZE_COMMON_IDX* (atoi $value))
-           (if (= $reason 4)
+           ;; Single-click: show phrase in input box
+           (setq *adzze-p* (nth *ADZZE_COMMON_IDX* *ADZZE_CUR_PHRASES*))
+           (if *adzze-p* (set_tile \"new_phrase\" *adzze-p*))
+           ;; Refresh phrase list
+           (start_list \"common_list\")
+           (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
+           (end_list)
+           (set_tile \"common_list\" (itoa *ADZZE_COMMON_IDX*))
+           ;; Double-click: insert into text editor
+           (if (= $reason 4) (adzze-phrase-dblclick))
+         )")
+
+      ;; ── ACTION: phrase input box – Enter key saves and moves to next ─
+      (action_tile "new_phrase"
+        "(progn
+           ;; Only process on Enter key (reason = 1)
+           (if (= $reason 1)
              (progn
-               (setq *adzze-p* (nth *ADZZE_COMMON_IDX* *ADZZE_CUR_PHRASES*))
-               (if *adzze-p*
+               (setq *adzze-phrase-ev* (get_tile \"new_phrase\"))
+               ;; Save the modified phrase
+               (if (and *ADZZE_CUR_PHRASES*
+                        (>= *ADZZE_COMMON_IDX* 0)
+                        (< *ADZZE_COMMON_IDX* (length *ADZZE_CUR_PHRASES*))
+                        *adzze-phrase-ev*
+                        (> (strlen *adzze-phrase-ev*) 0))
                  (progn
-                   (set_tile \"edit_text\" *adzze-p*)
-                   (setq *ADZZE_TEXT_LINES*
-                     (subst-nth *ADZZE_CUR_IDX* *adzze-p* *ADZZE_TEXT_LINES*))
-                   (start_list \"text_list\")
-                   (mapcar 'add_list *ADZZE_TEXT_LINES*)
+                   ;; Update the phrase in the list
+                   (setq *ADZZE_CUR_PHRASES*
+                     (subst-nth *ADZZE_COMMON_IDX* *adzze-phrase-ev* *ADZZE_CUR_PHRASES*))
+                   (adzze-update-cat-phrases *ADZZE_CUR_CAT* *ADZZE_CUR_PHRASES*)
+                   ;; Refresh phrase list
+                   (start_list \"common_list\")
+                   (mapcar 'add_list *ADZZE_CUR_PHRASES*)
                    (end_list)
-                   ;; Move to next line if not at the end
-                   (if (< *ADZZE_CUR_IDX* (1- (length *ADZZE_TEXT_LINES*)))
-                     (setq *ADZZE_CUR_IDX* (1+ *ADZZE_CUR_IDX*))
+                   ;; Move to next phrase
+                   (if (< *ADZZE_COMMON_IDX* (1- (length *ADZZE_CUR_PHRASES*)))
+                     (setq *ADZZE_COMMON_IDX* (1+ *ADZZE_COMMON_IDX*))
                    )
-                   (set_tile \"text_list\" (itoa *ADZZE_CUR_IDX*))
-                   (set_tile \"edit_text\" (nth *ADZZE_CUR_IDX* *ADZZE_TEXT_LINES*))
-                   ;; Set focus to text_list
-                   (mode_tile \"text_list\" 2)
+                   ;; Update selection and input box
+                   (set_tile \"common_list\" (itoa *ADZZE_COMMON_IDX*))
+                   (set_tile \"new_phrase\" (nth *ADZZE_COMMON_IDX* *ADZZE_CUR_PHRASES*))
                  )
                )
              )
@@ -1478,6 +1617,10 @@
            )
          )")
 
+      ;; ── ACTION: open config file ──────────────────────────────
+      (action_tile "open_file"
+        "(adzze-open-config-file)")
+
       ;; ── ACTION: delete selected phrase ────────────────────────
       (action_tile "del_phrase"
         "(progn
@@ -1500,6 +1643,27 @@
            )
          )")
 
+      ;; ── ACTION: clear all temp phrases ────────────────────────
+      (action_tile "clear_temp"
+        "(progn
+           (if (adzze-is-temp-cat)
+             (progn
+               (setq *ADZZE_CUR_PHRASES* nil)
+               (adzze-update-cat-phrases *ADZZE_CUR_CAT* *ADZZE_CUR_PHRASES*)
+               (setq *ADZZE_COMMON_IDX* 0)
+               (start_list \"common_list\")
+               (end_list)
+               (set_tile \"new_phrase\" \"\")
+             )
+           )
+         )")
+
+      ;; ── ACTION: replace all (temp category only) ──────────────
+      (action_tile "replace_all" "(done_dialog 4)")
+
+      ;; ── ACTION: pick text from CAD ────────────────────────────
+      (action_tile "pick_temp" "(done_dialog 3)")
+
       ;; ── ACTION: select line in text list (auto-save current) ──
       (action_tile "text_list"
         "(progn
@@ -1508,6 +1672,7 @@
              (setq *ADZZE_TEXT_LINES*
                (subst-nth *ADZZE_CUR_IDX* *adzze-ev* *ADZZE_TEXT_LINES*))
            )
+           ;; 禁用双击添加到候选文字功能 - 只允许单击选择
            (setq *ADZZE_CUR_IDX* (atoi $value))
            (set_tile \"edit_text\" (nth *ADZZE_CUR_IDX* *ADZZE_TEXT_LINES*))
            (start_list \"text_list\")
@@ -1537,6 +1702,9 @@
            (done_dialog 1)
          )")
 
+      ;; ── ACTION: re-pick text ──────────────────────────────────
+      (action_tile "repick" "(done_dialog 2)")
+
       (action_tile "cancel" "(done_dialog 0)")
 
       (setq result (start_dialog))
@@ -1548,11 +1716,20 @@
   (vl-file-delete dcl-file)
   (setvar "DYNMODE" old-dynmode)
 
-  ;; Return (entity . new-text) pairs if user clicked Apply
-  (if (= result 1)
-    (mapcar '(lambda (item line) (list (cadr item) line))
-            text-data *ADZZE_TEXT_LINES*)
-    nil
+  ;; Return based on dialog result
+  ;; result = 1: Apply (return modified data)
+  ;; result = 2: Re-pick (return special marker)
+  ;; result = 3: Pick temp (return special marker for temp pick)
+  ;; result = 4: Replace all (return special marker for replace all)
+  ;; result = 0: Cancel (return nil)
+  (cond
+    ((= result 1)
+     (mapcar '(lambda (item line) (list (cadr item) line))
+             text-data *ADZZE_TEXT_LINES*))
+    ((= result 2) 'repick)
+    ((= result 3) 'pick-temp)
+    ((= result 4) 'replace-all)
+    (t nil)
   )
 )
 
@@ -1617,6 +1794,276 @@
   result
 )
 
+;; ── Helper: handle text list double-click (add to phrases) ───
+
+(defun adzze-text-list-dblclick ()
+  (setq *adzze-dbl-text* (nth *ADZZE_CUR_IDX* *ADZZE_TEXT_LINES*))
+  (if (and *adzze-dbl-text* 
+           (> (strlen *adzze-dbl-text*) 0)
+           *ADZZE_CATS*
+           (>= *ADZZE_CUR_CAT* 0)
+           (< *ADZZE_CUR_CAT* (length *ADZZE_CATS*)))
+    (progn
+      ;; Check if phrase already exists
+      (if (not (member *adzze-dbl-text* *ADZZE_CUR_PHRASES*))
+        (progn
+          ;; Add to current category
+          (setq *ADZZE_CUR_PHRASES*
+            (append *ADZZE_CUR_PHRASES* (list *adzze-dbl-text*)))
+          (adzze-update-cat-phrases *ADZZE_CUR_CAT* *ADZZE_CUR_PHRASES*)
+          ;; Refresh phrase list
+          (start_list "common_list")
+          (mapcar 'add_list *ADZZE_CUR_PHRASES*)
+          (end_list)
+          ;; Select the newly added phrase
+          (set_tile "common_list" (itoa (1- (length *ADZZE_CUR_PHRASES*))))
+        )
+        (alert "此文字已存在于候选列表中！\n\nThis phrase already exists!")
+      )
+    )
+    (if (not *ADZZE_CATS*)
+      (alert "请先创建一个分类标签！\n\nPlease create a category first!")
+    )
+  )
+)
+
+;; ── Helper: switch category and move to front (MRU order) ────
+
+(defun adzze-switch-category ()
+  ;; Move selected category to front (most recently used)
+  (if (and *ADZZE_CATS* (> *ADZZE_CUR_CAT* 0))
+    (progn
+      (setq *adzze-selected-cat* (nth *ADZZE_CUR_CAT* *ADZZE_CATS*))
+      (setq *ADZZE_CATS* (remove-nth *ADZZE_CUR_CAT* *ADZZE_CATS*))
+      (setq *ADZZE_CATS* (cons *adzze-selected-cat* *ADZZE_CATS*))
+      (setq *ADZZE_CUR_CAT* 0)
+      (save-common-phrases-adzze *ADZZE_CATS*)
+    )
+  )
+  (setq *ADZZE_CUR_PHRASES*
+    (if *ADZZE_CATS* (cdr (nth *ADZZE_CUR_CAT* *ADZZE_CATS*)) nil))
+  (setq *ADZZE_COMMON_IDX* 0)
+  ;; Refresh category list
+  (start_list "cat_list")
+  (if *ADZZE_CATS* (mapcar 'add_list (adzze-get-cat-names)))
+  (end_list)
+  (set_tile "cat_list" (itoa *ADZZE_CUR_CAT*))
+  ;; Refresh phrase list
+  (start_list "common_list")
+  (if *ADZZE_CUR_PHRASES* (mapcar 'add_list *ADZZE_CUR_PHRASES*))
+  (end_list)
+  ;; Update phrase input box with first phrase of new category
+  (if (and *ADZZE_CUR_PHRASES* (> (length *ADZZE_CUR_PHRASES*) 0))
+    (set_tile "new_phrase" (nth 0 *ADZZE_CUR_PHRASES*))
+    (set_tile "new_phrase" "")
+  )
+  ;; Toggle button visibility
+  (adzze-toggle-buttons)
+)
+
+;; ── Helper: handle phrase list double-click ──────────────────
+
+(defun adzze-phrase-dblclick ()
+  (setq *adzze-p* (nth *ADZZE_COMMON_IDX* *ADZZE_CUR_PHRASES*))
+  (if *adzze-p*
+    (progn
+      (set_tile "edit_text" *adzze-p*)
+      (setq *ADZZE_TEXT_LINES*
+        (subst-nth *ADZZE_CUR_IDX* *adzze-p* *ADZZE_TEXT_LINES*))
+      (start_list "text_list")
+      (mapcar 'add_list *ADZZE_TEXT_LINES*)
+      (end_list)
+      ;; Move to next line if not at the end
+      (if (< *ADZZE_CUR_IDX* (1- (length *ADZZE_TEXT_LINES*)))
+        (setq *ADZZE_CUR_IDX* (1+ *ADZZE_CUR_IDX*))
+      )
+      (set_tile "text_list" (itoa *ADZZE_CUR_IDX*))
+      (set_tile "edit_text" (nth *ADZZE_CUR_IDX* *ADZZE_TEXT_LINES*))
+      ;; Set focus to text_list
+      (mode_tile "text_list" 2)
+    )
+  )
+)
+
+;; ── Helper: pick text from CAD and add to temp category ──────
+
+(defun adzze-pick-temp-text (/ i ss ent ent-type ent-data text-content vla-obj temp-cat-idx new-phrases new-count text-list y-coord insert-pt)
+  (princ "\n选择文字对象添加到临时候选区 (可多选): ")
+  (setq ss (ssget '((0 . "TEXT,MTEXT"))))
+  
+  (if ss
+    (progn
+      ;; Reload categories to ensure sync
+      (setq *ADZZE_CATS* (load-common-phrases-adzze))
+      
+      ;; Find or create "临时" category
+      (setq temp-cat-idx (adzze-find-temp-cat))
+      (if (not temp-cat-idx)
+        (progn
+          ;; Create "临时" category
+          (setq *ADZZE_CATS* (append *ADZZE_CATS* (list (list "临时"))))
+          (save-common-phrases-adzze *ADZZE_CATS*)
+          (setq temp-cat-idx (1- (length *ADZZE_CATS*)))
+        )
+      )
+      
+      ;; Extract text from selection with Y coordinate (for sorting)
+      (setq i 0)
+      (setq text-list '())  ;; List of (Y-coord text-content)
+      
+      (repeat (sslength ss)
+        (setq ent (ssname ss i))
+        (setq ent-type (cdr (assoc 0 (entget ent))))
+        (setq ent-data (entget ent))
+        (setq insert-pt (cdr (assoc 10 ent-data)))
+        (setq y-coord (caddr insert-pt))
+        
+        (cond
+          ((= ent-type "TEXT")
+           (setq text-content (cdr (assoc 1 ent-data)))
+          )
+          ((= ent-type "MTEXT")
+           (setq vla-obj (vlax-ename->vla-object ent))
+           (setq text-content (vla-get-TextString vla-obj))
+           (setq text-content (cleanup-mtext-adzze text-content))
+          )
+        )
+        
+        ;; Add to list with Y coordinate
+        (if (and text-content (> (strlen text-content) 0))
+          (setq text-list (cons (list y-coord text-content) text-list))
+        )
+        
+        (setq i (1+ i))
+      )
+      
+      ;; Sort by Y coordinate (descending - top to bottom)
+      (setq text-list (vl-sort text-list '(lambda (a b) (> (car a) (car b)))))
+      
+      ;; Extract text content only (remove duplicates)
+      (setq new-phrases '())
+      (foreach item text-list
+        (setq text-content (cadr item))
+        (if (not (member text-content new-phrases))
+          (setq new-phrases (append new-phrases (list text-content)))
+        )
+      )
+      
+      ;; Update temp category (replace all phrases)
+      (setq new-count (length new-phrases))
+      (adzze-update-cat-phrases temp-cat-idx new-phrases)
+      
+      ;; Reload to ensure sync
+      (setq *ADZZE_CATS* (load-common-phrases-adzze))
+      
+      (princ (strcat "\n已替换临时候选区，共 " (itoa new-count) " 个文字"))
+    )
+    (princ "\n未选择任何文字对象")
+  )
+)
+
+;; ── Helper: find "临时" category index ────────────────────────
+
+(defun adzze-find-temp-cat (/ i found idx)
+  (setq i 0)
+  (setq found nil)
+  (setq idx nil)
+  (while (and (< i (length *ADZZE_CATS*)) (not found))
+    (if (equal (car (nth i *ADZZE_CATS*)) "临时")
+      (progn
+        (setq idx i)
+        (setq found T)
+      )
+    )
+    (setq i (1+ i))
+  )
+  idx
+)
+
+;; ── Helper: replace all text in CAD drawing using temp phrases ──
+
+(defun adzze-replace-all-temp (/ i j phrase-count text-count replaced-count search-text replace-text ss ent ent-type ent-data vla-obj text-content total-replaced)
+  (setq phrase-count (length *ADZZE_CUR_PHRASES*))
+  (setq text-count (length *ADZZE_TEXT_LINES*))
+  (setq total-replaced 0)
+  
+  (if (and (> phrase-count 0) (> text-count 0))
+    (progn
+      (princ "\n开始全文替换...")
+      
+      ;; Loop through each text line (as search pattern)
+      (setq i 0)
+      (while (< i (min phrase-count text-count))
+        (setq search-text (nth i *ADZZE_TEXT_LINES*))      ;; 文字列表 = 要查找的
+        (setq replace-text (nth i *ADZZE_CUR_PHRASES*))    ;; 候选文字 = 要替换成的
+        (setq replaced-count 0)
+        
+        (princ (strcat "\n查找: \"" search-text "\" → 替换为: \"" replace-text "\""))
+        
+        ;; Select all TEXT and MTEXT objects in the drawing
+        (setq ss (ssget "X" '((0 . "TEXT,MTEXT"))))
+        
+        (if ss
+          (progn
+            ;; Loop through all text objects
+            (setq j 0)
+            (repeat (sslength ss)
+              (setq ent (ssname ss j))
+              (setq ent-type (cdr (assoc 0 (entget ent))))
+              (setq ent-data (entget ent))
+              
+              (cond
+                ;; TEXT object
+                ((= ent-type "TEXT")
+                 (setq text-content (cdr (assoc 1 ent-data)))
+                 (if (equal text-content search-text)
+                   (progn
+                     ;; Replace text content
+                     (setq ent-data (subst (cons 1 replace-text) (assoc 1 ent-data) ent-data))
+                     (entmod ent-data)
+                     (entupd ent)
+                     (setq replaced-count (1+ replaced-count))
+                   )
+                 )
+                )
+                
+                ;; MTEXT object
+                ((= ent-type "MTEXT")
+                 (setq vla-obj (vlax-ename->vla-object ent))
+                 (setq text-content (vla-get-TextString vla-obj))
+                 (setq text-content (cleanup-mtext-adzze text-content))
+                 (if (equal text-content search-text)
+                   (progn
+                     ;; Replace text content
+                     (vla-put-TextString vla-obj replace-text)
+                     (entupd ent)
+                     (setq replaced-count (1+ replaced-count))
+                   )
+                 )
+                )
+              )
+              
+              (setq j (1+ j))
+            )
+            
+            (princ (strcat " - 替换了 " (itoa replaced-count) " 处"))
+            (setq total-replaced (+ total-replaced replaced-count))
+          )
+          (princ " - 未找到匹配文字")
+        )
+        
+        (setq i (1+ i))
+      )
+      
+      (princ (strcat "\n全文替换完成！共替换 " (itoa total-replaced) " 处文字"))
+      
+      ;; Regenerate drawing
+      (command "_.REGEN")
+    )
+    (princ "\n候选文字列表或文字列表为空！")
+  )
+)
+
 ;; ── Load common phrases with categories ──────────────────────
 ;; Config file format:
 ;;   [CategoryName]
@@ -1675,6 +2122,7 @@
     (progn
       (setq cats
         (list
+          (list "临时")
           (list "常用"   "待定" "核实" "修改" "确认" "删除" "保留")
           (list "状态"   "已完成" "进行中" "未开始" "已取消")
           (list "审核"   "符合要求" "需要复核" "请设计师确认" "按图施工")
@@ -1684,6 +2132,30 @@
   )
 
   cats
+)
+
+;; ── Open config file in default text editor ───────────────────
+
+(defun adzze-open-config-file (/ config-file)
+  (setq config-file (strcat (getenv "APPDATA") "\\ADZZE_CommonPhrases.txt"))
+  
+  ;; Check if file exists, create if not
+  (if (not (findfile config-file))
+    (progn
+      ;; Create default file
+      (save-common-phrases-adzze *ADZZE_CATS*)
+      (princ (strcat "\n配置文件已创建: " config-file))
+    )
+  )
+  
+  ;; Open file with default text editor
+  (if (findfile config-file)
+    (progn
+      (startapp "notepad.exe" config-file)
+      (princ (strcat "\n已打开配置文件: " config-file))
+    )
+    (alert (strcat "无法找到配置文件:\n" config-file))
+  )
 )
 
 ;; ── Save common phrases with categories to config file ────────
